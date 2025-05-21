@@ -6,8 +6,10 @@
   "scripts": {
     "start": "electron .",
     "build": "electron-builder",
-    "package-win": "electron-packager . PulseGuardAgent --platform=win32 --arch=x64 --out=dist --icon=assets/icon.ico --overwrite --asar",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder",
+    "package-win": "electron-packager . PulseGuardAgent --platform=win32 --arch=x64 --out=dist --overwrite --asar",
+    "postinstall": "electron-builder install-app-deps"
   },
   "author": "PulseGuard",
   "license": "MIT",
@@ -23,19 +25,38 @@
   "build": {
     "appId": "com.pulseguard.agent",
     "productName": "PulseGuard Agent",
+    "artifactName": "PulseGuardAgent-Setup-${version}.${ext}",
     "win": {
       "target": "nsis",
       "icon": "assets/icon.ico"
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": false,
+      "allowToChangeInstallationDirectory": true,
       "runAfterFinish": true,
       "installerIcon": "assets/icon.ico",
       "uninstallerIcon": "assets/icon.ico",
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "license": "license.txt"
-    }
+      "license": "license.txt",
+      "shortcutName": "PulseGuard Agent",
+      "perMachine": true,
+      "include": "installer.nsh"
+    },
+    "extraResources": [
+      {
+        "from": "license.txt",
+        "to": "license.txt"
+      }
+    ],
+    "files": [
+      "**/*",
+      "!**/node_modules/*/{CHANGELOG.md,README.md,README,readme.md,readme}",
+      "!**/node_modules/*/{test,__tests__,tests,powered-test,example,examples}",
+      "!**/node_modules/*.d.ts",
+      "!**/node_modules/.bin",
+      "!**/.{idea,git,cache,github,vscode}",
+      "!**/{.DS_Store,.git,.gitignore,.npmignore}"
+    ]
   }
 } 

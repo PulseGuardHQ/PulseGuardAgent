@@ -56,6 +56,13 @@
       box-sizing: border-box;
     }
     
+    .form-text {
+      display: block;
+      margin-top: 5px;
+      font-size: 12px;
+      color: #777;
+    }
+    
     button {
       background-color: #2a5885;
       color: white;
@@ -182,14 +189,19 @@
     
     <!-- Configuration screen shown when not configured -->
     <div id="setup-screen">
+      <h2>PulseGuard Agent Setup</h2>
+      <p>Please enter your Device UUID and API Token to continue. You can find these values in your PulseGuard dashboard.</p>
+      
       <div class="form-group">
         <label for="device-uuid">Device UUID:</label>
-        <input type="text" id="device-uuid" placeholder="Enter your Device UUID" required>
+        <input type="text" id="device-uuid" placeholder="e.g. b238700e-2b61-45ba-aafc-07970e504ceb" required>
+        <small class="form-text">The UUID uniquely identifies your device in the PulseGuard system.</small>
       </div>
       
       <div class="form-group">
         <label for="api-token">API Token:</label>
-        <input type="text" id="api-token" placeholder="Enter your API Token" required>
+        <input type="text" id="api-token" placeholder="Your API token from the PulseGuard dashboard" required>
+        <small class="form-text">The API token is used to authenticate your device with the PulseGuard servers.</small>
       </div>
       
       <button id="save-config-button">Save Configuration</button>
@@ -316,6 +328,14 @@
         return;
       }
       
+      // Disable button while processing
+      saveConfigButton.disabled = true;
+      saveConfigButton.textContent = 'Saving...';
+      
+      // Clear previous messages
+      configError.style.display = 'none';
+      configSuccess.style.display = 'none';
+      
       // Send configuration to main process
       ipcRenderer.send('save-config', { deviceUUID, apiToken });
     });
@@ -352,18 +372,38 @@
       configSuccess.style.display = 'block';
       configError.style.display = 'none';
       
-      // Switch to dashboard view
+      // Re-enable button
+      saveConfigButton.disabled = false;
+      saveConfigButton.textContent = 'Save Configuration';
+      
+      // Wait for connection status before transitioning
+    });
+    
+    ipcRenderer.on('connection-status', (event, status) => {
+      if (status.success) {
+        configSuccess.textContent = 'Configuration saved successfully! Connection to PulseGuard API established.';
+      } else {
+        configSuccess.textContent = 'Configuration saved! ' + status.message;
+      }
+      
+      configSuccess.style.display = 'block';
+      
+      // Switch to dashboard view after a delay
       setTimeout(() => {
         setupScreen.style.display = 'none';
         dashboardScreen.style.display = 'block';
         
         // Get current status
         ipcRenderer.send('get-status');
-      }, 1000);
+      }, 2000);
     });
     
     ipcRenderer.on('config-error', (event, message) => {
       showConfigError(message);
+      
+      // Re-enable button
+      saveConfigButton.disabled = false;
+      saveConfigButton.textContent = 'Save Configuration';
     });
     
     ipcRenderer.on('status-update', (event, status) => {

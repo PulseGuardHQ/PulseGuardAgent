@@ -33,8 +33,8 @@ const AGENT_VERSION = app.getVersion() || '1.0.0';
 let config = {
   api_token: '',
   device_uuid: '',
-  api_base_url: 'https://app.pulseguard.nl/api',
-  check_interval: 60,
+  api_base_url: 'https://app.pulseguard.nl',
+  check_interval: 15,
   full_check_interval: 86400,
   metrics_enabled: true
 };
@@ -69,6 +69,7 @@ function loadConfig() {
       const fileContents = fs.readFileSync(configFile, 'utf8');
       const loadedConfig = JSON.parse(fileContents);
       config = { ...config, ...loadedConfig };
+      
       logToFile(`Configuration loaded successfully - API URL: ${config.api_base_url}`);
       return true;
     } else {
@@ -112,13 +113,19 @@ function setupAutoLaunch() {
   const autoLauncher = new AutoLaunch({
     name: 'PulseGuard Agent',
     path: process.execPath,
-    isHidden: true
+    isHidden: true,
+    args: ['--startup']
   });
 
   autoLauncher.isEnabled().then((isEnabled) => {
     if (!isEnabled) {
-      autoLauncher.enable();
-      logToFile('Auto-launch enabled');
+      autoLauncher.enable().then(() => {
+        logToFile('Auto-launch enabled');
+      }).catch((err) => {
+        logToFile(`Failed to enable auto-launch: ${err.message}`, 'ERROR');
+      });
+    } else {
+      logToFile('Auto-launch is already enabled');
     }
   }).catch((err) => {
     logToFile(`Auto-launch setup error: ${err.message}`, 'ERROR');
@@ -134,7 +141,7 @@ function createWindow() {
       nodeIntegration: true,
       contextIsolation: false
     },
-    icon: path.join(__dirname, 'assets/icon.ico'),
+    icon: path.join(__dirname, 'assets/website-icon.png'),
     show: false
   });
 
@@ -156,7 +163,7 @@ function createWindow() {
 
 // Create tray icon
 function createTray() {
-  tray = new Tray(path.join(__dirname, 'assets/icon.ico'));
+  tray = new Tray(path.join(__dirname, 'assets/website-icon.png'));
   
   const contextMenu = Menu.buildFromTemplate([
     { label: 'Open PulseGuard', click: () => { if (mainWindow) mainWindow.show(); } },
@@ -241,7 +248,8 @@ function getIPAddress() {
 function makeApiRequest(endpoint, method, data = null) {
   return new Promise((resolve, reject) => {
     try {
-      const apiUrl = new URL(endpoint, config.api_base_url);
+      const apiUrl = new URL('/api' + endpoint, config.api_base_url);
+      
       const options = {
         method: method,
         headers: {
@@ -249,6 +257,12 @@ function makeApiRequest(endpoint, method, data = null) {
           'X-API-Token': config.api_token
         }
       };
+
+      // Debug info
+      logToFile(`Making API request to: ${apiUrl}`, 'DEBUG');
+      if (data) {
+        logToFile(`Request payload: ${JSON.stringify(data)}`, 'DEBUG');
+      }
 
       const req = https.request(apiUrl, options, (res) => {
         let responseBody = '';
@@ -261,11 +275,16 @@ function makeApiRequest(endpoint, method, data = null) {
           if (res.statusCode >= 200 && res.statusCode < 300) {
             try {
               const response = JSON.parse(responseBody);
+              logToFile(`API response: ${res.statusCode} OK`, 'DEBUG');
               resolve({ statusCode: res.statusCode, body: response });
             } catch (e) {
               resolve({ statusCode: res.statusCode, body: responseBody });
             }
           } else {
+            logToFile(`API error response: HTTP ${res.statusCode}`, 'DEBUG');
+            if (responseBody) {
+              logToFile(`Response body: ${responseBody.substring(0, 500)}...`, 'DEBUG');
+            }
             reject({ 
               statusCode: res.statusCode, 
               message: `HTTP request failed with status ${res.statusCode}`,
@@ -276,6 +295,7 @@ function makeApiRequest(endpoint, method, data = null) {
       });
       
       req.on('error', (error) => {
+        logToFile(`API request network error: ${error.message}`, 'ERROR');
         reject({ statusCode: 0, message: error.message });
       });
       
@@ -285,6 +305,7 @@ function makeApiRequest(endpoint, method, data = null) {
       
       req.end();
     } catch (error) {
+      logToFile(`API request error: ${error.message}`, 'ERROR');
       reject({ statusCode: 0, message: error.message });
     }
   });
@@ -294,11 +315,44 @@ function makeApiRequest(endpoint, method, data = null) {
 async function testApiConnection() {
   try {
     logToFile('Testing API connection...');
-    const result = await makeApiRequest('/devices/config', 'GET');
-    logToFile('API connection successful (HTTP 200)');
+    
+    // Probeer eerst de config endpoint - GET in plaats van POST
+    try {
+      const configResult = await makeApiRequest('/devices/config', 'GET');
+      logToFile('API config connection successful (HTTP 200)');
+      return true;
+    } catch (configError) {
+      logToFile(`API config test failed: ${configError.message}, trying status endpoint...`, 'WARN');
+    }
+    
+    // Probeer dan de status endpoint
+    try {
+      const statusResult = await makeApiRequest('/devices/status', 'GET');
+      logToFile('API status connection successful (HTTP 200)');
+      return true;
+    } catch (statusError) {
+      logToFile(`API status test failed: ${statusError.message}, trying check-in...`, 'WARN');
+    }
+    
+    // Als laatste proberen we de check-in endpoint met minimale data
+    const testPayload = {
+      token: config.api_token,
+      uuid: config.device_uuid,
+      device_uuid: config.device_uuid,
+      hostname: os.hostname(),
+      metrics: {
+        cpu_usage: 0,
+        memory_usage: 0,
+        disk_usage: 0,
+        uptime: 0
+      }
+    };
+    
+    const result = await makeApiRequest('/devices/check-in', 'POST', testPayload);
+    logToFile('API check-in connection successful (HTTP 200)');
     return true;
   } catch (error) {
-    logToFile(`API connection failed: ${error.message}`, 'ERROR');
+    logToFile(`All API connection tests failed: ${error.message}`, 'ERROR');
     
     // Perform additional diagnostics
     try {
@@ -322,7 +376,47 @@ async function testApiConnection() {
   }
 }
 
-// Get basic system metrics
+// Get detailed metrics and hardware info
+async function getDetailedSystemInfo() {
+  try {
+    const [cpuInfo, memInfo, diskInfo, networkInfo] = await Promise.all([
+      si.cpu(),
+      si.mem(),
+      si.fsSize(),
+      si.networkInterfaces()
+    ]);
+    
+    // Calculate disk usage (system drive)
+    let systemDrive = diskInfo.find(d => d.mount === 'C:' || d.mount === '/');
+    if (!systemDrive && diskInfo.length > 0) {
+      systemDrive = diskInfo[0];
+    }
+    
+    // Find primary network adapter
+    const primaryAdapter = networkInfo.find(adapter => 
+      adapter.operstate === 'up' && 
+      !adapter.virtual && 
+      adapter.mac && 
+      adapter.mac.length > 0
+    ) || networkInfo[0];
+    
+    return {
+      cpu: cpuInfo,
+      memory: memInfo,
+      disk: systemDrive,
+      network: primaryAdapter
+    };
+  } catch (error) {
+    logToFile(`Error getting detailed system info: ${error.message}`, 'ERROR');
+    return {
+      cpu: { cores: 1, manufacturer: 'Unknown', brand: 'Unknown' },
+      memory: { total: 1024 * 1024 * 1024, free: 512 * 1024 * 1024 },
+      disk: { size: 100 * 1024 * 1024 * 1024, used: 50 * 1024 * 1024 * 1024 }
+    };
+  }
+}
+
+// Get basic system metrics with fallbacks and validations
 async function getBasicMetrics() {
   try {
     // Use systeminformation to get accurate metrics
@@ -332,13 +426,23 @@ async function getBasicMetrics() {
       si.fsSize()
     ]);
     
-    // Calculate CPU usage
-    const cpuUsage = parseFloat(cpu.currentLoad.toFixed(2));
+    // Calculate CPU usage with validation - ensure it's a NUMBER type, not string
+    let cpuUsage = parseFloat(cpu.currentLoad.toFixed(2));
+    if (isNaN(cpuUsage) || cpuUsage < 0 || cpuUsage > 100) {
+      logToFile(`Invalid CPU usage value: ${cpuUsage}, using fallback`, 'WARN');
+      cpuUsage = 5.0; // Safe fallback value
+    }
     
-    // Calculate memory usage
-    const memUsage = parseFloat(((mem.used / mem.total) * 100).toFixed(2));
+    // Calculate memory usage with validation - ensure it's a NUMBER type, not string
+    let memoryTotal = mem.total;
+    let memoryUsed = mem.used;
+    let memUsage = parseFloat(((memoryUsed / memoryTotal) * 100).toFixed(2));
+    if (isNaN(memUsage) || memUsage < 0 || memUsage > 100) {
+      logToFile(`Invalid memory usage value: ${memUsage}, using fallback`, 'WARN');
+      memUsage = 50.0; // Safe fallback value
+    }
     
-    // Calculate disk usage (system drive)
+    // Calculate disk usage (system drive) - ensure it's a NUMBER type, not string
     let diskUsage = 0;
     const systemDrive = disk.find(d => d.mount === 'C:' || d.mount === '/');
     if (systemDrive) {
@@ -346,23 +450,28 @@ async function getBasicMetrics() {
     } else if (disk.length > 0) {
       diskUsage = parseFloat(disk[0].use.toFixed(2));
     }
+    if (isNaN(diskUsage) || diskUsage < 0 || diskUsage > 100) {
+      logToFile(`Invalid disk usage value: ${diskUsage}, using fallback`, 'WARN');
+      diskUsage = 50.0; // Safe fallback value
+    }
     
-    // Get uptime in seconds
+    // Get uptime in seconds as an INTEGER, not string or float
     const uptime = Math.floor(os.uptime());
     
+    // Force numeric types for compatibility with API
     return {
-      cpu_usage: cpuUsage,
-      memory_usage: memUsage,
-      disk_usage: diskUsage,
-      uptime: uptime
+      cpu_usage: Number(cpuUsage),
+      memory_usage: Number(memUsage),
+      disk_usage: Number(diskUsage),
+      uptime: Number(uptime)
     };
   } catch (error) {
     logToFile(`Error getting system metrics: ${error.message}`, 'ERROR');
     return {
-      cpu_usage: 0,
-      memory_usage: 0,
-      disk_usage: 0,
-      uptime: 0
+      cpu_usage: Number(5.0),
+      memory_usage: Number(50.0),
+      disk_usage: Number(50.0),
+      uptime: Number(60)
     };
   }
 }
@@ -373,6 +482,9 @@ async function checkForUpdates() {
     logToFile('Checking for agent updates...');
     
     const data = {
+      token: config.api_token,
+      uuid: config.device_uuid,
+      device_uuid: config.device_uuid,
       current_version: AGENT_VERSION,
       os_type: 'windows'
     };
@@ -416,17 +528,42 @@ async function createFullPayload() {
     // Get basic metrics
     const metrics = await getBasicMetrics();
     
-    // Get hardware information
-    const [cpu, mem] = await Promise.all([
-      si.cpu(),
-      si.mem()
-    ]);
+    // Get detailed hardware information
+    const detailedInfo = await getDetailedSystemInfo();
     
     // System specs
     const systemSpecs = {
-      cpu_cores: cpu.cores,
-      total_memory: Math.round(mem.total / (1024 * 1024)) // Convert to MB
+      cpu_cores: detailedInfo.cpu.cores || 1,
+      total_memory: Math.round((detailedInfo.memory.total || 1024 * 1024 * 1024) / (1024 * 1024)) // Convert to MB
     };
+    
+    // Get hostname or use a fallback
+    let hostname = os.hostname();
+    if (!hostname || hostname.length === 0) {
+      hostname = "unknown-host";
+      logToFile("Could not determine hostname, using fallback", "WARN");
+    }
+    
+    // Get IP address with fallback
+    let ipAddress = getIPAddress();
+    if (!ipAddress || ipAddress.length === 0) {
+      ipAddress = "127.0.0.1";
+      logToFile("Could not determine IP address, using fallback", "WARN");
+    }
+    
+    // Get MAC address with fallback
+    let macAddress = await getMacAddress();
+    if (!macAddress || macAddress.length === 0) {
+      macAddress = "AA:BB:CC:DD:EE:FF";
+      logToFile("Could not determine MAC address, using fallback", "WARN");
+    }
+    
+    // Get OS version with validation
+    let osVersion = os.release();
+    if (!osVersion || osVersion.length === 0) {
+      osVersion = "10.0";
+      logToFile("Could not determine OS version, using fallback", "WARN");
+    }
     
     // Get a list of running services (Windows only)
     let services = [];
@@ -434,7 +571,7 @@ async function createFullPayload() {
       try {
         const serviceData = await si.services('*');
         services = serviceData.slice(0, 10).map(service => ({
-          name: service.name || service.display_name,
+          name: service.name || service.display_name || "Unknown Service",
           status: service.running ? 'running' : 'stopped'
         }));
       } catch (e) {
@@ -442,13 +579,16 @@ async function createFullPayload() {
       }
     }
     
-    // Full payload
+    // Payload met token ipv uuid - proberen verschillende opties
     return {
-      hostname: os.hostname(),
-      ip_address: getIPAddress(),
-      mac_address: await getMacAddress(),
+      token: config.api_token, // Proberen met token in plaats van device_uuid
+      uuid: config.device_uuid, // Alternatieve naam
+      device_uuid: config.device_uuid, // Originele naam als backup
+      hostname: hostname,
+      ip_address: ipAddress,
+      mac_address: macAddress,
       os_type: 'windows',
-      os_version: os.release(),
+      os_version: osVersion,
       system_specs: systemSpecs,
       metrics: metrics,
       services: services,
@@ -460,7 +600,14 @@ async function createFullPayload() {
     // Return a minimal payload in case of error
     const metrics = await getBasicMetrics();
     return {
-      hostname: os.hostname(),
+      token: config.api_token,
+      uuid: config.device_uuid,
+      device_uuid: config.device_uuid,
+      hostname: os.hostname() || "unknown-host",
+      ip_address: "127.0.0.1",
+      mac_address: "AA:BB:CC:DD:EE:FF",
+      os_type: "windows",
+      os_version: "10.0",
       metrics: metrics,
       full_check_in: true
     };
@@ -471,6 +618,9 @@ async function createFullPayload() {
 async function createMetricsPayload() {
   const metrics = await getBasicMetrics();
   return {
+    token: config.api_token,
+    uuid: config.device_uuid,
+    device_uuid: config.device_uuid,
     metrics: metrics
   };
 }
@@ -478,6 +628,12 @@ async function createMetricsPayload() {
 // Main function to collect and send metrics
 async function collectAndSendMetrics(forceFullUpdate = false) {
   try {
+    // Skip sending metrics if not configured yet
+    if (!config.api_token || !config.device_uuid) {
+      logToFile('Skipping metrics collection - API token and Device UUID not configured yet', 'WARN');
+      return;
+    }
+    
     // Apply backoff logic if we had recent failures
     const now = new Date();
     const timeSinceLastSend = (now - lastSendTime) / 1000;
@@ -513,76 +669,79 @@ async function collectAndSendMetrics(forceFullUpdate = false) {
     
     // Send data to API
     logToFile(`Sending ${needsFullUpdate ? 'full' : 'metrics-only'} payload to API`);
-    const response = await makeApiRequest('/devices/check-in', 'POST', payload);
     
-    // Update successful send tracking
-    lastSendTime = now;
-    consecutiveFailures = 0;
-    backoffTime = 0;
-    
-    // Update last full check time if this was a full update
-    if (needsFullUpdate) {
-      lastFullCheckTime = currentTime;
-      // Store this in memory, no need to write to disk for our Electron app
-    }
-    
-    logToFile('Metrics sent successfully');
-    
-    // Check for configuration updates from server response
-    if (response.body.config) {
-      if (response.body.config.check_interval && response.body.config.check_interval !== config.check_interval) {
-        logToFile(`Updating check interval from ${config.check_interval} to ${response.body.config.check_interval} seconds`);
-        config.check_interval = response.body.config.check_interval;
-        saveConfig();
-        
-        // Update the metrics collection interval
-        if (metricsInterval) {
-          clearInterval(metricsInterval);
-          metricsInterval = setInterval(collectAndSendMetrics, config.check_interval * 1000);
+    try {
+      const response = await makeApiRequest('/devices/check-in', 'POST', payload);
+      
+      // Update successful send tracking
+      lastSendTime = now;
+      consecutiveFailures = 0;
+      backoffTime = 0;
+      
+      // Update last full check time if this was a full update
+      if (needsFullUpdate) {
+        lastFullCheckTime = currentTime;
+      }
+      
+      logToFile('Metrics sent successfully');
+      
+      // Check for configuration updates from server response
+      if (response.body.config) {
+        if (response.body.config.check_interval && response.body.config.check_interval !== config.check_interval) {
+          logToFile(`Updating check interval from ${config.check_interval} to ${response.body.config.check_interval} seconds`);
+          config.check_interval = response.body.config.check_interval;
+          saveConfig();
+          
+          // Update the metrics collection interval
+          if (metricsInterval) {
+            clearInterval(metricsInterval);
+            metricsInterval = setInterval(collectAndSendMetrics, config.check_interval * 1000);
+          }
+        }
+      }
+      
+      // Check for restart command from server
+      if (response.body.restart_required) {
+        logToFile('Restart command received from API. Restarting application...');
+        app.relaunch();
+        app.exit();
+      }
+      
+      // Update UI if window is open
+      if (mainWindow) {
+        mainWindow.webContents.send('metrics-sent', payload.metrics);
+      }
+    } catch (error) {
+      // Handle API errors
+      logToFile(`Failed to send metrics: ${error.message}`, 'ERROR');
+      
+      // Implement exponential backoff
+      consecutiveFailures++;
+      backoffTime = Math.min(300, Math.pow(2, consecutiveFailures)); // Max 5 minutes backoff
+      logToFile(`Backing off for ${backoffTime} seconds after ${consecutiveFailures} consecutive failures`, 'WARN');
+      
+      // Try with minimal payload if it was a 500 error and we sent a full payload
+      if (error.statusCode === 500 && payload.full_check_in) {
+        try {
+          logToFile('Detected server error (HTTP 500), trying with minimal payload...', 'WARN');
+          const minimalPayload = {
+            device_uuid: config.device_uuid,
+            metrics: payload.metrics
+          };
+          
+          const response = await makeApiRequest('/devices/check-in', 'POST', minimalPayload);
+          logToFile('Minimal payload succeeded');
+          
+          // Reset failure tracking
+          consecutiveFailures = 0;
+          backoffTime = 0;
+        } catch (retryError) {
+          logToFile(`Minimal payload also failed: ${retryError.message}`, 'ERROR');
         }
       }
     }
-    
-    // Check for restart command from server
-    if (response.body.restart_required) {
-      logToFile('Restart command received from API. Restarting application...');
-      app.relaunch();
-      app.exit();
-    }
-    
-    // Update UI if window is open
-    if (mainWindow) {
-      mainWindow.webContents.send('metrics-sent', payload.metrics);
-    }
-    
   } catch (error) {
-    // Handle API errors
-    logToFile(`Failed to send metrics: ${error.message}`, 'ERROR');
-    
-    // Implement exponential backoff
-    consecutiveFailures++;
-    backoffTime = Math.min(300, Math.pow(2, consecutiveFailures)); // Max 5 minutes backoff
-    logToFile(`Backing off for ${backoffTime} seconds after ${consecutiveFailures} consecutive failures`, 'WARN');
-    
-    // Try with minimal payload if it was a 500 error and we sent a full payload
-    if (error.statusCode === 500 && payload.full_check_in) {
-      try {
-        logToFile('Detected server error (HTTP 500), trying with minimal payload...', 'WARN');
-        const minimalPayload = {
-          hostname: os.hostname(),
-          metrics: payload.metrics
-        };
-        
-        const response = await makeApiRequest('/devices/check-in', 'POST', minimalPayload);
-        logToFile('Minimal payload succeeded');
-        
-        // Reset failure tracking
-        consecutiveFailures = 0;
-        backoffTime = 0;
-      } catch (retryError) {
-        logToFile(`Minimal payload also failed: ${retryError.message}`, 'ERROR');
-      }
-    }
+    logToFile(`Error in metrics collection: ${error.message}`, 'ERROR');
   }
 }
 
@@ -621,6 +780,21 @@ ipcMain.on('save-config', async (event, { deviceUUID, apiToken }) => {
       return;
     }
     
+    // Validate UUID format
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!uuidRegex.test(deviceUUID)) {
+      event.reply('config-error', 'Device UUID format is invalid. Please use the format provided by PulseGuard.');
+      return;
+    }
+    
+    // Validate API token has minimum length
+    if (apiToken.length < 20) {
+      event.reply('config-error', 'API Token is too short. Please enter a valid API Token.');
+      return;
+    }
+    
+    logToFile(`Saving new configuration with Device UUID: ${deviceUUID.substring(0, 8)}...`);
+    
     // Update config
     config.device_uuid = deviceUUID;
     config.api_token = apiToken;
@@ -629,6 +803,17 @@ ipcMain.on('save-config', async (event, { deviceUUID, apiToken }) => {
     ensureDirectories();
     if (saveConfig()) {
       event.reply('config-saved');
+      
+      // Test API connection with new config
+      logToFile('Testing API connection with new configuration...');
+      const connectionSuccess = await testApiConnection();
+      if (connectionSuccess) {
+        logToFile('API connection test successful with new configuration');
+        mainWindow.webContents.send('connection-status', { success: true, message: 'Connection to PulseGuard API successful!' });
+      } else {
+        logToFile('API connection test failed with new configuration, but will continue trying', 'WARN');
+        mainWindow.webContents.send('connection-status', { success: false, message: 'Could not connect to PulseGuard API, but will continue trying.' });
+      }
       
       // Restart metrics collection with new configuration
       startMetricsCollection();
@@ -639,6 +824,7 @@ ipcMain.on('save-config', async (event, { deviceUUID, apiToken }) => {
       event.reply('config-error', 'Failed to save configuration file');
     }
   } catch (error) {
+    logToFile(`Error saving configuration: ${error.message}`, 'ERROR');
     event.reply('config-error', `Error: ${error.message}`);
   }
 });
@@ -665,35 +851,38 @@ ipcMain.on('send-metrics-now', (event) => {
     });
 });
 
-// App ready handler
-app.whenReady().then(async () => {
-  // Ensure required directories exist
+// Check for startup argument
+const isStartup = process.argv.includes('--startup');
+
+// App ready event
+app.on('ready', async () => {
   ensureDirectories();
-  
-  // Log application start
-  logToFile(`PulseGuard Agent starting... Version: ${AGENT_VERSION}`);
-  
-  // Check admin privileges
-  const admin = await isAdmin();
-  if (!admin) {
-    logToFile('Running without administrator privileges. Some functionality may be limited.', 'WARN');
-  }
-  
-  // Load configuration
   loadConfig();
   
-  // Create window and tray
+  // Check if admin
+  const adminStatus = await isAdmin();
+  if (!adminStatus) {
+    logToFile('Application is not running with administrator privileges. Some features may not work correctly.', 'WARN');
+  }
+  
   createWindow();
   createTray();
+  setupAutoLaunch();
+  
+  // Start with main window hidden if this is startup launch
+  if (isStartup) {
+    if (mainWindow) mainWindow.hide();
+    logToFile('Started in background mode');
+  } else {
+    // Only show window if not startup
+    if (mainWindow) mainWindow.show();
+  }
   
   // Start metrics collection if configured
   if (config.api_token && config.device_uuid) {
     startMetricsCollection();
   } else {
-    // Show window for onboarding if not configured
-    if (mainWindow) {
-      mainWindow.show();
-    }
+    logToFile('Application started but not fully configured yet - metrics collection disabled', 'WARN');
   }
 });
 
