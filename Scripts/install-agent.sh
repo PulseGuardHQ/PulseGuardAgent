@@ -155,6 +155,43 @@ function get_config_value() {
     return 1
 }
 
+function execute_power_command() {
+    local action="$1"
+    log "Executing power command: $action"
+    
+    # Define command mapping
+    local restart_cmd="shutdown -r now"
+    local shutdown_cmd="shutdown -h now"
+    local sleep_cmd="systemctl suspend"
+    local lock_cmd="loginctl lock-session"
+    
+    # Execute the appropriate command
+    case "$action" in
+        "restart")
+            log "Executing system restart command"
+            $restart_cmd
+            ;;
+        "shutdown")
+            log "Executing system shutdown command"
+            $shutdown_cmd
+            ;;
+        "sleep")
+            log "Executing system sleep command"
+            $sleep_cmd
+            ;;
+        "lock")
+            log "Executing screen lock command"
+            $lock_cmd
+            ;;
+        *)
+            log "ERROR: Unknown power command: $action"
+            return 1
+            ;;
+    esac
+    
+    return 0
+}
+
 function get_cpu_usage() {
     # More accurate CPU calculation based on averages
     # First try mpstat which gives more accurate values
@@ -434,6 +471,13 @@ function collect_metrics() {
                 sed -i "s/\"check_interval\": [0-9]*/\"check_interval\": $CHECK_INTERVAL/" "$CONFIG_FILE"
             fi
         fi
+        
+        # Check for power commands in the response
+        local POWER_COMMAND=$(echo "$RESPONSE" | jq -r '.power_command // empty')
+        if [ ! -z "$POWER_COMMAND" ] && [ "$POWER_COMMAND" != "null" ]; then
+            log "Received power command: $POWER_COMMAND"
+            execute_power_command "$POWER_COMMAND"
+        fi
     else
         log "Failed to send metrics: HTTP $HTTP_STATUS"
         log_debug "Error Response: $RESPONSE"
@@ -469,6 +513,13 @@ function collect_metrics() {
                         # Update the config file
                         sed -i "s/\"check_interval\": [0-9]*/\"check_interval\": $CHECK_INTERVAL/" "$CONFIG_FILE"
                     fi
+                fi
+                
+                # Check for power commands in the retry response
+                local POWER_COMMAND=$(echo "$RETRY_RESPONSE" | jq -r '.power_command // empty')
+                if [ ! -z "$POWER_COMMAND" ] && [ "$POWER_COMMAND" != "null" ]; then
+                    log "Received power command: $POWER_COMMAND"
+                    execute_power_command "$POWER_COMMAND"
                 fi
             else
                 log "Minimal payload also failed: HTTP $RETRY_STATUS"

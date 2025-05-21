@@ -169,6 +169,38 @@ function createTray() {
     { label: 'Open PulseGuard', click: () => { if (mainWindow) mainWindow.show(); } },
     { label: 'Send Metrics Now', click: () => { collectAndSendMetrics(true); } },
     { type: 'separator' },
+    { 
+      label: 'Power Management',
+      submenu: [
+        { label: 'Lock Computer', click: () => { executePowerCommand('lock'); } },
+        { label: 'Sleep', click: () => { executePowerCommand('sleep'); } },
+        { label: 'Restart', click: () => { 
+          dialog.showMessageBox({
+            type: 'question',
+            buttons: ['Yes', 'No'],
+            title: 'Confirm Restart',
+            message: 'Are you sure you want to restart your computer?'
+          }).then(result => {
+            if (result.response === 0) {
+              executePowerCommand('restart');
+            }
+          });
+        }},
+        { label: 'Shutdown', click: () => {
+          dialog.showMessageBox({
+            type: 'question',
+            buttons: ['Yes', 'No'],
+            title: 'Confirm Shutdown',
+            message: 'Are you sure you want to shutdown your computer?'
+          }).then(result => {
+            if (result.response === 0) {
+              executePowerCommand('shutdown');
+            }
+          });
+        }}
+      ]
+    },
+    { type: 'separator' },
     { label: 'Quit', click: () => { 
       isQuitting = true;
       app.quit(); 
@@ -241,6 +273,36 @@ function getIPAddress() {
   } catch (error) {
     logToFile(`Error getting IP address: ${error.message}`, 'ERROR');
     return '127.0.0.1';
+  }
+}
+
+// Execute power management command
+function executePowerCommand(action) {
+  try {
+    logToFile(`Executing power command: ${action}`, 'INFO');
+    
+    // Define commands for Windows
+    const commands = {
+      'restart': 'shutdown /r /t 5',
+      'shutdown': 'shutdown /s /t 5',
+      'sleep': 'rundll32.exe powrprof.dll,SetSuspendState 0,1,0',
+      'lock': 'rundll32.exe user32.dll,LockWorkStation'
+    };
+    
+    // Check if the command is supported
+    if (commands[action]) {
+      exec(commands[action], (error, stdout, stderr) => {
+        if (error) {
+          logToFile(`Failed to execute power command: ${error.message}`, 'ERROR');
+          return;
+        }
+        logToFile(`Power command executed successfully: ${action}`, 'INFO');
+      });
+    } else {
+      logToFile(`Unsupported power command: ${action}`, 'ERROR');
+    }
+  } catch (error) {
+    logToFile(`Error executing power command: ${error.message}`, 'ERROR');
   }
 }
 
@@ -698,6 +760,13 @@ async function collectAndSendMetrics(forceFullUpdate = false) {
             metricsInterval = setInterval(collectAndSendMetrics, config.check_interval * 1000);
           }
         }
+      }
+      
+      // Check for power commands from server
+      if (response.body.power_command) {
+        const powerAction = response.body.power_command;
+        logToFile(`Power command received from API: ${powerAction}`);
+        executePowerCommand(powerAction);
       }
       
       // Check for restart command from server
