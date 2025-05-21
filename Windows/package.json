@@ -1,0 +1,41 @@
+{
+  "name": "pulseguard-agent",
+  "version": "1.0.0",
+  "description": "PulseGuard Agent for Windows",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder",
+    "package-win": "electron-packager . PulseGuardAgent --platform=win32 --arch=x64 --out=dist --icon=assets/icon.ico --overwrite --asar",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "PulseGuard",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^25.0.0",
+    "electron-builder": "^24.4.0",
+    "electron-packager": "^17.1.2"
+  },
+  "dependencies": {
+    "auto-launch": "^5.0.5",
+    "systeminformation": "^5.18.10"
+  },
+  "build": {
+    "appId": "com.pulseguard.agent",
+    "productName": "PulseGuard Agent",
+    "win": {
+      "target": "nsis",
+      "icon": "assets/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": false,
+      "runAfterFinish": true,
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico",
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "license": "license.txt"
+    }
+  }
+} 
