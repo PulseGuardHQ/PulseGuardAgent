@@ -2,6 +2,15 @@
 # PulseGuard Agent Installation Script for Linux
 # ------------------------------------------------
 
+# Fix for Windows line endings (CRLF)
+if grep -q $'\r' "$0"; then
+    echo "Detected Windows line endings (CRLF). Converting to Unix format (LF)..."
+    TMP_FILE=$(mktemp)
+    sed 's/\r$//' "$0" > "$TMP_FILE"
+    chmod +x "$TMP_FILE"
+    exec "$TMP_FILE" "$@"
+fi
+
 # Check parameters
 if [ $# -lt 2 ]; then
     echo "Usage: $0 <device_uuid> <api_token> [check_interval]"
