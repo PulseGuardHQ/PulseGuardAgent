@@ -20,37 +20,37 @@ CHECK_INTERVAL=${3:-60}  # Use third parameter if provided, otherwise default to
 API_BASE_URL="https://app.pulseguard.nl/api"
 AGENT_VERSION="1.0.0" # Initial version
 
-echo -e "\e[34mPulseGuard Agent Installation\e[0m"
-echo -e "\e[34m=========================\e[0m"
+echo -e "\\e[34mPulseGuard Agent Installation\\e[0m"
+echo -e "\\e[34m=========================\\e[0m"
 echo ""
-echo -e "\e[32mDevice UUID: $DEVICE_UUID\e[0m"
-echo -e "\e[32mAPI URL: $API_BASE_URL\e[0m"
-echo -e "\e[32mAgent Version: $AGENT_VERSION\e[0m"
-echo -e "\e[32mCheck Interval: ${CHECK_INTERVAL} seconds\e[0m"
+echo -e "\\e[32mDevice UUID: $DEVICE_UUID\\e[0m"
+echo -e "\\e[32mAPI URL: $API_BASE_URL\\e[0m"
+echo -e "\\e[32mAgent Version: $AGENT_VERSION\\e[0m"
+echo -e "\\e[32mCheck Interval: ${CHECK_INTERVAL} seconds\\e[0m"
 echo ""
 
 # Check if script is run as root
 if [ "$(id -u)" -ne 0 ]; then
-    echo -e "\e[31mThis script must be run as root or with sudo.\e[0m"
+    echo -e "\\e[31mThis script must be run as root or with sudo.\\e[0m"
     exit 1
 fi
 
 # Check for curl
 if ! command -v curl &> /dev/null; then
-    echo -e "\e[33mInstalling curl, which is required for the agent...\e[0m"
+    echo -e "\\e[33mInstalling curl, which is required for the agent...\\e[0m"
     if command -v apt-get &> /dev/null; then
         apt-get update && apt-get install -y curl
     elif command -v yum &> /dev/null; then
         yum install -y curl
     else
-        echo -e "\e[31mCould not install curl. Please install it manually and run the script again.\e[0m"
+        echo -e "\\e[31mCould not install curl. Please install it manually and run the script again.\\e[0m"
         exit 1
     fi
 fi
 
 # Installation directory
 INSTALL_DIR="/opt/pulseguard"
-echo -e "\e[33mCreating installation directories...\e[0m"
+echo -e "\\e[33mCreating installation directories...\\e[0m"
 mkdir -p $INSTALL_DIR
 mkdir -p $INSTALL_DIR/logs
 touch $INSTALL_DIR/logs/agent.log
@@ -58,7 +58,7 @@ chmod -R 755 $INSTALL_DIR
 chmod 644 $INSTALL_DIR/logs/agent.log
 
 # Create config file
-echo -e "\e[33mCreating configuration file...\e[0m"
+echo -e "\\e[33mCreating configuration file...\\e[0m"
 cat > $INSTALL_DIR/config.json << EOL
 {
     "api_token": "$API_TOKEN",
@@ -71,24 +71,24 @@ EOL
 
 # Verify config file was created
 if [ ! -f "$INSTALL_DIR/config.json" ]; then
-    echo -e "\e[31mFailed to create config file. Check permissions and disk space.\e[0m"
+    echo -e "\\e[31mFailed to create config file. Check permissions and disk space.\\e[0m"
     exit 1
 fi
 
 chmod 644 $INSTALL_DIR/config.json
-echo -e "\e[32mConfiguration file created successfully.\e[0m"
+echo -e "\\e[32mConfiguration file created successfully.\\e[0m"
 
 # Test network connectivity to the API server
-echo -e "\e[33mTesting network connectivity...\e[0m"
+echo -e "\\e[33mTesting network connectivity...\\e[0m"
 API_HOST=$(echo "$API_BASE_URL" | sed -E 's|^https?://||' | sed -E 's|/.*$||')
 if ping -c 1 $API_HOST &> /dev/null; then
-    echo -e "\e[32mNetwork connectivity test successful.\e[0m"
+    echo -e "\\e[32mNetwork connectivity test successful.\\e[0m"
 else
-    echo -e "\e[31mWarning: Unable to ping $API_HOST. This might affect agent connectivity.\e[0m"
+    echo -e "\\e[31mWarning: Unable to ping $API_HOST. This might affect agent connectivity.\\e[0m"
 fi
 
 # Create the agent script
-echo -e "\e[33mCreating agent script...\e[0m"
+echo -e "\\e[33mCreating agent script...\\e[0m"
 cat > $INSTALL_DIR/pulseguard-agent << 'EOL'
 #!/bin/bash
 # PulseGuard Agent for Linux
@@ -128,29 +128,39 @@ function get_config_value() {
     log_debug "Config file contents:"
     cat "$CONFIG_FILE" >> $LOG_FILE 2>&1
     
-    # Better approach to extract values from JSON
-    if [ "$key" = "api_base_url" ]; then
-        # Special handling for URL to avoid regex issues
-        local pattern='"api_base_url"[[:space:]]*:[[:space:]]*"([^"]*)"'
-        if [[ $(cat "$CONFIG_FILE") =~ $pattern ]]; then
-            echo "${BASH_REMATCH[1]}"
+    if ! command -v jq &> /dev/null; then
+        log_debug "jq is not available for parsing config. Using grep/sed fallback."
+        # Fallback using grep/sed if jq is not available
+        local value=$(grep -oP "\"$key\"[[:space:]]*:[[:space:]]*\"\\K[^\"]*\"" "$CONFIG_FILE")
+        if [ -n "$value" ]; then
+            echo "$value"
             return 0
-        else
-            # Fallback to default URL
-            log_debug "Could not extract api_base_url, using default"
+        elif [ "$key" = "api_base_url" ]; then # Default for api_base_url
+            log_debug "Could not extract api_base_url with grep, using default"
             echo "https://app.pulseguard.nl/api"
+            return 0
+        elif [ "$key" = "check_interval" ]; then # Default for check_interval
+            log_debug "Could not extract check_interval with grep, using default 60"
+            echo "60"
             return 0
         fi
     else
-        # For other config values
-        local pattern="\"$key\"[[:space:]]*:[[:space:]]*\"([^\"]*)\""
-        if [[ $(cat "$CONFIG_FILE") =~ $pattern ]]; then
-            echo "${BASH_REMATCH[1]}"
+        # Use jq if available
+        local value=$(jq -r ".$key // empty" "$CONFIG_FILE")
+        if [ -n "$value" ] && [ "$value" != "null" ]; then
+            echo "$value"
+            return 0
+        elif [ "$key" = "api_base_url" ]; then # Default for api_base_url
+            log_debug "Could not extract api_base_url with jq, using default"
+            echo "https://app.pulseguard.nl/api"
+            return 0
+        elif [ "$key" = "check_interval" ]; then # Default for check_interval
+            log_debug "Could not extract check_interval with jq, using default 60"
+            echo "60"
             return 0
         fi
     fi
     
-    # If we get here, we couldn't extract the value
     log_debug "Could not extract $key from config file"
     return 1
 }
@@ -159,70 +169,107 @@ function execute_power_command() {
     local action="$1"
     log "Executing power command: $action"
     
-    # Define command mapping
     local restart_cmd="shutdown -r now"
     local shutdown_cmd="shutdown -h now"
     local sleep_cmd="systemctl suspend"
-    local lock_cmd="loginctl lock-session"
-    
-    # Execute the appropriate command
+    # Attempt to find a suitable lock command
+    local lock_cmd=""
+    if command -v loginctl &>/dev/null; then
+        lock_cmd="loginctl lock-session"
+    elif command -v gnome-screensaver-command &>/dev/null; then
+        lock_cmd="gnome-screensaver-command -l"
+    elif command -v dm-tool &>/dev/null; then
+        lock_cmd="dm-tool lock"
+    elif command -v mate-screensaver-command &>/dev/null; then
+        lock_cmd="mate-screensaver-command -l"
+    elif command -v cinnamon-screensaver-command &>/dev/null; then
+        lock_cmd="cinnamon-screensaver-command -l"
+    elif command -v xdg-screensaver &>/dev/null; then
+        lock_cmd="xdg-screensaver lock"
+    else
+        log "No common lock command found. Lock functionality may not work."
+    fi
+
     case "$action" in
         "restart")
-            log "Executing system restart command"
-            $restart_cmd
+            log "Executing system restart command: $restart_cmd"
+            eval "$restart_cmd"
             ;;
         "shutdown")
-            log "Executing system shutdown command"
-            $shutdown_cmd
+            log "Executing system shutdown command: $shutdown_cmd"
+            eval "$shutdown_cmd"
             ;;
         "sleep")
-            log "Executing system sleep command"
-            $sleep_cmd
+            if command -v systemctl &>/dev/null && [[ "$(systemctl is-system-running)" =~ (running|degraded) ]]; then
+                log "Executing system sleep command: $sleep_cmd"
+                eval "$sleep_cmd"
+            else
+                log "systemctl suspend not available or system not in a suspendable state."
+            fi
             ;;
         "lock")
-            log "Executing screen lock command"
-            $lock_cmd
+            if [ -n "$lock_cmd" ]; then
+                log "Executing screen lock command: $lock_cmd"
+                eval "$lock_cmd"
+            else
+                log "ERROR: Screen lock command not found."
+                return 1
+            fi
             ;;
         *)
             log "ERROR: Unknown power command: $action"
             return 1
             ;;
     esac
-    
     return 0
 }
 
 function get_cpu_usage() {
-    # More accurate CPU calculation based on averages
-    # First try mpstat which gives more accurate values
     if command -v mpstat &> /dev/null; then
         mpstat 1 1 | grep -A 5 "CPU" | tail -n 1 | awk '{print 100 - $12}'
     else
-        # Fallback to a more reliable calculation using /proc/stat
-        # This calculates the average across all CPUs
-        local cpu_idle=$(awk '{if (NR==1) {print $5}}' /proc/stat)
-        local cpu_total=$(awk '{if (NR==1) {total=0; for(i=2;i<=NF;i++) total+=$i; print total}}' /proc/stat)
-        sleep 0.5  # Short sleep for CPU measurement
-        local cpu_idle_after=$(awk '{if (NR==1) {print $5}}' /proc/stat)
-        local cpu_total_after=$(awk '{if (NR==1) {total=0; for(i=2;i<=NF;i++) total+=$i; print total}}' /proc/stat)
-        
-        local idle_diff=$((cpu_idle_after - cpu_idle))
-        local total_diff=$((cpu_total_after - cpu_total))
-        
-        if [ $total_diff -eq 0 ]; then
-            echo "0"  # Avoid division by zero
+        local stat_file="/proc/stat"
+        local line1_before=$(grep "^cpu " "$stat_file")
+        sleep 0.5
+        local line1_after=$(grep "^cpu " "$stat_file")
+
+        local user_before=$(echo "$line1_before" | awk '{print $2}')
+        local nice_before=$(echo "$line1_before" | awk '{print $3}')
+        local system_before=$(echo "$line1_before" | awk '{print $4}')
+        local idle_before=$(echo "$line1_before" | awk '{print $5}')
+        local iowait_before=$(echo "$line1_before" | awk '{print $6}')
+        local irq_before=$(echo "$line1_before" | awk '{print $7}')
+        local softirq_before=$(echo "$line1_before" | awk '{print $8}')
+
+        local user_after=$(echo "$line1_after" | awk '{print $2}')
+        local nice_after=$(echo "$line1_after" | awk '{print $3}')
+        local system_after=$(echo "$line1_after" | awk '{print $4}')
+        local idle_after=$(echo "$line1_after" | awk '{print $5}')
+        local iowait_after=$(echo "$line1_after" | awk '{print $6}')
+        local irq_after=$(echo "$line1_after" | awk '{print $7}')
+        local softirq_after=$(echo "$line1_after" | awk '{print $8}')
+
+        local total_before=$((user_before + nice_before + system_before + idle_before + iowait_before + irq_before + softirq_before))
+        local total_after=$((user_after + nice_after + system_after + idle_after + iowait_after + irq_after + softirq_after))
+
+        local total_delta=$((total_after - total_before))
+        local idle_delta=$((idle_after - idle_before))
+
+        if [ $total_delta -eq 0 ]; then
+            echo "0"
         else
-            echo "$(( 100 - (idle_diff * 100 / total_diff) ))"
+            local usage=$(( ( (total_delta - idle_delta) * 100) / total_delta ))
+            echo "$usage"
         fi
     fi
 }
 
 function get_memory_usage() {
-    free | grep Mem | awk '{print $3/$2 * 100}'
+    free | grep Mem | awk '{printf "%.2f", $3/$2 * 100}'
 }
 
 function get_disk_usage() {
-    df -h / | grep / | awk '{print $5}' | tr -d '%'
+    df -P / | grep / | awk '{print $5}' | tr -d '%'
 }
 
 function get_uptime_seconds() {
@@ -232,8 +279,7 @@ function get_uptime_seconds() {
 function check_dns() {
     local domain=$1
     log_debug "Testing DNS resolution for $domain"
-    
-    if host $domain &>/dev/null; then
+    if host "$domain" &>/dev/null; then
         log_debug "DNS resolution successful for $domain"
         return 0
     else
@@ -243,433 +289,501 @@ function check_dns() {
 }
 
 function test_api_connection() {
-    local API_TOKEN=$(get_config_value "api_token")
-        local API_BASE_URL=$(get_config_value "api_base_url")        # Validate API_BASE_URL format    if [[ ! $API_BASE_URL =~ ^https?:// ]]; then        log "ERROR: API URL format is invalid: $API_BASE_URL"        return 1    fi
-    
-    local API_HOST=$(echo "$API_BASE_URL" | sed -E 's|^https?://||' | sed -E 's|/.*$||')
-    log_debug "Extracted API host: $API_HOST"
-    
-    # Try to resolve the hostname
-    if ! check_dns $API_HOST; then
-        log "WARNING: Cannot resolve hostname $API_HOST. Check your network/DNS configuration."
+    local api_token_val=$(get_config_value "api_token")
+    local api_base_url_val=$(get_config_value "api_base_url")
+
+    if [ -z "$api_token_val" ] || [ -z "$api_base_url_val" ]; then
+        log "ERROR: API token or base URL missing in config for API test."
+        return 1
     fi
     
-    local CONFIG_URL="$API_BASE_URL/devices/config"
+    if [[ ! $api_base_url_val =~ ^https?:// ]]; then
+        log "ERROR: API URL format is invalid: $api_base_url_val"
+        return 1
+    fi
     
-    log "Testing API connection to $CONFIG_URL..."
+    local api_host=$(echo "$api_base_url_val" | sed -E 's|^https?://||' | sed -E 's|/.*$||')
+    log_debug "Extracted API host: $api_host"
     
-    # Send a simple test request with debug info
-    log_debug "Sending curl request to $CONFIG_URL"
+    if ! check_dns "$api_host"; then
+        log "WARNING: Cannot resolve hostname $api_host. Check your network/DNS configuration."
+    fi
     
-    local CURL_OUTPUT=$(mktemp)
-    local HTTP_CODE=$(curl -v -s -o $CURL_OUTPUT -w "%{http_code}" \
+    local config_url="$api_base_url_val/devices/config"
+    
+    log "Testing API connection to $config_url..."
+    log_debug "Sending curl request to $config_url"
+    
+    local curl_output_file=$(mktemp)
+    # Use -L to follow redirects, ensure API token is correctly passed.
+    local http_code=$(curl -L -s -o "$curl_output_file" -w "%{http_code}" \
         -H "Content-Type: application/json" \
-        -H "X-API-Token: $API_TOKEN" \
-        "$CONFIG_URL" 2>&1)
+        -H "X-API-Token: $api_token_val" \
+        "$config_url" 2>&1)
     
-    if [ "$HTTP_CODE" == "200" ]; then
+    if [ "$http_code" == "200" ]; then
         log "API connection successful (HTTP 200)"
-        rm -f $CURL_OUTPUT
+        rm -f "$curl_output_file"
         return 0
     else 
-        log "API connection failed (HTTP $HTTP_CODE)"
-        
-        # Additional diagnostics without exposing sensitive data
-        log_debug "Running network diagnostics..."
+        log "API connection failed (HTTP $http_code)"
+        log_debug "Response from $config_url: $(cat "$curl_output_file")"
         
         if command -v ping &> /dev/null; then
-            log_debug "Ping test to $API_HOST:"
-            ping -c 3 $API_HOST >> $LOG_FILE 2>&1
+            log_debug "Ping test to $api_host:"
+            ping -c 3 "$api_host" >> $LOG_FILE 2>&1 # Quoted api_host
         fi
         
         if command -v traceroute &> /dev/null; then
-            log_debug "Traceroute to $API_HOST:"
-            traceroute $API_HOST >> $LOG_FILE 2>&1
+            log_debug "Traceroute to $api_host:"
+            traceroute "$api_host" >> $LOG_FILE 2>&1 # Quoted api_host
         fi
         
-        rm -f $CURL_OUTPUT
+        rm -f "$curl_output_file"
         return 1
     fi
 }
 
 function check_for_updates() {
-    local API_TOKEN=$(get_config_value "api_token")
-    local API_BASE_URL=$(get_config_value "api_base_url")
-    
-    if [ -z "$API_TOKEN" ] || [ -z "$API_BASE_URL" ]; then
-        log "ERROR: Missing API token or base URL in configuration"
+    local api_token_val=$(get_config_value "api_token")
+    local api_base_url_val=$(get_config_value "api_base_url")
+
+    if [ -z "$api_token_val" ] || [ -z "$api_base_url_val" ]; then
+        log "ERROR: Missing API token or base URL in configuration for update check."
         return 1
     fi
     
-    local UPDATE_URL="$API_BASE_URL/devices/check-for-updates"
+    local update_check_url="$api_base_url_val/devices/check-for-updates"
     
     log "Checking for agent updates..."
     
-    # Create the payload without the token (it will be sent in header)
-    local PAYLOAD="{\"current_version\":\"$AGENT_VERSION\",\"os_type\":\"linux\"}"
+    local payload="{\"current_version\":\"$AGENT_VERSION\",\"os_type\":\"linux\"}"
     
-    # Send the request
-    local CURL_OUTPUT=$(mktemp)
-    local HTTP_CODE=$(curl -s -o $CURL_OUTPUT -w "%{http_code}" \
+    local curl_output_file=$(mktemp)
+    local http_code=$(curl -L -s -o "$curl_output_file" -w "%{http_code}" \
         -H "Content-Type: application/json" \
-        -H "X-API-Token: $API_TOKEN" \
-        -d "$PAYLOAD" \
-        "$UPDATE_URL" 2>&1)
+        -H "X-API-Token: $api_token_val" \
+        -d "$payload" \
+        "$update_check_url" 2>&1)
     
-    if [ "$HTTP_CODE" == "200" ]; then
-        # Parse the response
-        local UPDATE_AVAILABLE=$(grep -o '"update_available":[^,}]*' $CURL_OUTPUT | cut -d: -f2 | tr -d ' "')
-        
-        if [ "$UPDATE_AVAILABLE" == "true" ]; then
-            local LATEST_VERSION=$(grep -o '"latest_version":"[^"]*"' $CURL_OUTPUT | cut -d: -f2 | tr -d '"')
-            local UPDATE_URL=$(grep -o '"update_url":"[^"]*"' $CURL_OUTPUT | cut -d: -f2 | tr -d '"')
+    if [ "$http_code" == "200" ]; then
+        if ! command -v jq &> /dev/null; then
+            log "WARNING: jq not found. Update parsing might be unreliable."
+            # Basic grep parsing as fallback
+            local update_available_grep=$(grep -o "\"update_available\":true" "$curl_output_file")
+            if [[ -n "$update_available_grep" ]]; then UPDATE_AVAILABLE="true"; else UPDATE_AVAILABLE="false"; fi
+        else
+            local update_available=$(jq -r '.update_available // false' "$curl_output_file")
+        fi
+
+        if [ "$update_available" == "true" ]; then
+            if ! command -v jq &> /dev/null; then
+                local latest_version=$(grep -oP "\"latest_version\":\"\\K[^\"]*" "$curl_output_file")
+                local update_url_resp=$(grep -oP "\"update_url\":\"\\K[^\"}]*" "$curl_output_file")
+            else
+                local latest_version=$(jq -r '.latest_version // empty' "$curl_output_file")
+                local update_url_resp=$(jq -r '.update_url // empty' "$curl_output_file")
+            fi
+            log "Update available! Current: $AGENT_VERSION, Latest: $latest_version"
             
-            log "Update available! Current: $AGENT_VERSION, Latest: $LATEST_VERSION"
-            
-            # Log update notes (simplified parsing)
-            log "Update notes:"
-            grep -o '"update_notes":{[^}]*}' $CURL_OUTPUT | sed 's/"update_notes"://' >> $LOG_FILE
-            
-            # Initiate self-update if URL is provided
-            if [ -n "$UPDATE_URL" ]; then
+            if command -v jq &> /dev/null; then
+                jq -r '.update_notes // {}' "$curl_output_file" >> $LOG_FILE
+            else
+                grep -o "\"update_notes\":{[^}]*}" "$curl_output_file" | sed 's/"update_notes"://' >> $LOG_FILE
+            fi
+
+            if [ -n "$update_url_resp" ]; then
                 log "Starting self-update process..."
-                self_update "$UPDATE_URL"
+                self_update "$update_url_resp"
             fi
         else
             log "Agent is up to date (version $AGENT_VERSION)"
         fi
     else 
-        log "Error checking for updates: HTTP $HTTP_CODE"
-        log_debug "Response: $(cat $CURL_OUTPUT)"
+        log "Error checking for updates: HTTP $http_code"
+        log_debug "Response: $(cat "$curl_output_file")"
     fi
     
-    rm -f $CURL_OUTPUT
+    rm -f "$curl_output_file"
 }
 
 function self_update() {
-    local UPDATE_URL="$1"
+    local update_download_url="$1"
     
-    # Create update directory if it doesn't exist
     mkdir -p "$UPDATE_DIR"
+    local temp_file="$UPDATE_DIR/new-agent.sh"
     
-    # Download the new version
-    local TEMP_FILE="$UPDATE_DIR/new-agent.sh"
-    
-    log "Downloading update from $UPDATE_URL..."
-    if curl -s -o "$TEMP_FILE" "$UPDATE_URL"; then
-        # Verify the downloaded file
-        if [ ! -s "$TEMP_FILE" ]; then
-            log "ERROR: Failed to download update: File is empty or missing"
+    log "Downloading update from $update_download_url..."
+    if curl -s -L -o "$temp_file" "$update_download_url"; then
+        if [ ! -s "$temp_file" ]; then
+            log "ERROR: Failed to download update: File is empty or missing from $update_download_url"
+            rm -f "$temp_file"
             return 1
         fi
         
-        # Make the new file executable
-        chmod +x "$TEMP_FILE"
+        chmod +x "$temp_file"
         
-        # Create an update script
-        local UPDATE_SCRIPT="$UPDATE_DIR/update.sh"
-        cat > "$UPDATE_SCRIPT" << EOF
+        local update_script_path="$UPDATE_DIR/perform_update.sh" # Changed name for clarity
+        cat > "$update_script_path" << EOF
 #!/bin/bash
 # PulseGuard Update Script
 
-LOG_FILE="/opt/pulseguard/logs/update.log"
-SOURCE_FILE="$TEMP_FILE"
-TARGET_FILE="/opt/pulseguard/pulseguard-agent"
+SELF_LOG_FILE="/opt/pulseguard/logs/update.log"
+SOURCE_AGENT_FILE="$temp_file"
+TARGET_AGENT_FILE="/opt/pulseguard/pulseguard-agent"
 
-function write_log() {
-    local timestamp=$(date)
-    echo "$timestamp: [UPDATE] $1" >> "$LOG_FILE"
+function write_to_log() {
+    local current_timestamp=$(date)
+    echo "$current_timestamp: [UPDATE] $1" >> "$SELF_LOG_FILE"
 }
 
-# Wait for original process to exit
-sleep 5
+mkdir -p "$(dirname "$SELF_LOG_FILE")"
+touch "$SELF_LOG_FILE"
+chmod 644 "$SELF_LOG_FILE"
 
-write_log "Starting update process..."
+write_to_log "Update script started. Waiting for main agent to exit..."
+sleep 5 # Wait for original process to exit
 
-# Copy the new agent file
-if cp "$SOURCE_FILE" "$TARGET_FILE"; then
-    write_log "Agent file updated successfully"
+write_to_log "Attempting to replace agent file: $SOURCE_AGENT_FILE -> $TARGET_AGENT_FILE"
+if cp "$SOURCE_AGENT_FILE" "$TARGET_AGENT_FILE"; then
+    write_to_log "Agent file updated successfully."
+    rm -f "$SOURCE_AGENT_FILE" # Clean up downloaded file
     
-    # Restart the service
-    write_log "Restarting agent service..."
-    systemctl restart pulseguard-agent
-    
-    write_log "Update completed successfully!"
+    write_to_log "Restarting agent service..."
+    if command -v systemctl &> /dev/null && systemctl is-active --quiet pulseguard-agent.service; then
+        if systemctl restart pulseguard-agent.service; then
+            write_to_log "Agent service restarted via systemctl."
+        else
+            write_to_log "Failed to restart agent via systemctl. Exit code: $?"
+        fi
+    elif command -v service &> /dev/null; then
+        if service pulseguard-agent restart; then
+            write_to_log "Agent service restarted via service command."
+        else
+            write_to_log "Failed to restart agent via service command. Exit code: $?"
+        fi
+    else
+        write_to_log "Could not automatically restart service. Please restart pulseguard-agent manually."
+    fi
+    write_to_log "Update completed successfully! Exiting update script."
+    exit 0
 else
-    write_log "Error during update: Failed to copy file"
+    write_to_log "ERROR: Failed to copy $SOURCE_AGENT_FILE to $TARGET_AGENT_FILE. Update failed."
+    exit 1
 fi
 EOF
         
-        # Make the update script executable
-        chmod +x "$UPDATE_SCRIPT"
+        chmod +x "$update_script_path"
         
-        # Run the update script in the background
-        log "Preparing to update agent in background..."
-        nohup "$UPDATE_SCRIPT" > /dev/null 2>&1 &
+        log "Executing update script $update_script_path in background..."
+        nohup "$update_script_path" > /dev/null 2>&1 &
         
-        # Exit this script to allow the update script to replace the file
-        log "Update scheduled. Agent will restart momentarily."
-        sleep 2
-        exit 0
+        log "Update scheduled. Agent will exit to allow update script to run."
+        sleep 2 # Give nohup a moment to detach
+        exit 0 # Exit current agent to allow replacement
     else
-        log "ERROR: Failed to download update"
+        log "ERROR: Failed to download update from $update_download_url (curl command failed)"
     fi
 }
 
 function collect_metrics() {
-    local CPU_USAGE=$(get_cpu_usage)
-    local MEMORY_USAGE=$(get_memory_usage)
-    local DISK_USAGE=$(get_disk_usage)
-    local UPTIME=$(get_uptime_seconds)
-    local HOSTNAME=$(hostname)
-    local IP_ADDR=$(hostname -I | awk '{print $1}')
-    local MAC_ADDR=$(cat /sys/class/net/$(ip route show default | awk '/default/ {print $5}')/address 2>/dev/null || echo "00:00:00:00:00:00")
+    local cpu_usage_val=$(get_cpu_usage)
+    local memory_usage_val=$(get_memory_usage)
+    local disk_usage_val=$(get_disk_usage)
+    local uptime_val=$(get_uptime_seconds)
+    local hostname_val=$(hostname)
+    local ip_addr_val=$(hostname -I | awk '{print $1}' || echo "127.0.0.1")
+    local mac_addr_val=$(cat /sys/class/net/$(ip route show default | awk '/default/ {print $5}')/address 2>/dev/null || echo "00:00:00:00:00:00")
     
-    # Get OS info
-    local OS_TYPE=$(cat /etc/os-release | grep "^ID=" | cut -d= -f2 | tr -d '"')
-    local OS_VERSION=$(cat /etc/os-release | grep "^VERSION_ID=" | cut -d= -f2 | tr -d '"')
+    local os_type_val="unknown"
+    local os_version_val="unknown"
+    if [ -f /etc/os-release ]; then
+        os_type_val=$(grep "^ID=" /etc/os-release | cut -d= -f2 | tr -d '"')
+        os_version_val=$(grep "^VERSION_ID=" /etc/os-release | cut -d= -f2 | tr -d '"')
+    fi
     
-    # Create metrics payload
-    local METRICS="{\"cpu_usage\":$CPU_USAGE,\"memory_usage\":$MEMORY_USAGE,\"disk_usage\":$DISK_USAGE,\"uptime\":$UPTIME}"
+    local metrics_json="{\"cpu_usage\":$cpu_usage_val,\"memory_usage\":$memory_usage_val,\"disk_usage\":$disk_usage_val,\"uptime\":$uptime_val}"
+    local system_specs_json="{\"cpu_cores\":$(nproc || echo 1),\"total_memory\":$(free -m | grep Mem | awk '{print $2}' || echo 1024)}"
+    local data_payload="{\"hostname\":\"$hostname_val\",\"ip_address\":\"$ip_addr_val\",\"mac_address\":\"$mac_addr_val\",\"os_type\":\"$os_type_val\",\"os_version\":\"$os_version_val\",\"system_specs\":$system_specs_json,\"metrics\":$metrics_json}"
     
-    # Create system specs payload
-    local SYSTEM_SPECS="{\"cpu_cores\":$(nproc),\"total_memory\":$(free -m | grep Mem | awk '{print $2}')}"
+    local api_token_val=$(get_config_value "api_token")
+    local api_base_url_val=$(get_config_value "api_base_url")
     
-    # Create the full data payload
-    local DATA="{\"hostname\":\"$HOSTNAME\",\"ip_address\":\"$IP_ADDR\",\"mac_address\":\"$MAC_ADDR\",\"os_type\":\"$OS_TYPE\",\"os_version\":\"$OS_VERSION\",\"system_specs\":$SYSTEM_SPECS,\"metrics\":$METRICS}"
+    if [ -z "$api_token_val" ] || [ -z "$api_base_url_val" ]; then
+        log "ERROR: API token or base URL missing in config. Cannot send metrics."
+        return 1
+    fi
     
-    # Get API token from config
-    local API_TOKEN=$(get_config_value "api_token")
-    local API_BASE_URL=$(get_config_value "api_base_url")
-    local CHECKIN_URL="$API_BASE_URL/devices/check-in"
+    local checkin_url_val="$api_base_url_val/devices/check-in"
     
-    log_debug "Sending metrics payload: $DATA"
-    log_debug "Sending to URL: $CHECKIN_URL"
+    log_debug "Sending metrics payload: $data_payload"
+    log_debug "Sending to URL: $checkin_url_val"
     
-    # Send the data to the API
-    local RESULT=$(curl -s -X POST \
+    local curl_output_file=$(mktemp)
+    local http_code=$(curl -L -s -X POST \
         -H "Content-Type: application/json" \
-        -H "X-API-Token: $API_TOKEN" \
-        -d "$DATA" \
+        -H "X-API-Token: $api_token_val" \
+        -d "$data_payload" \
         -w "\nHTTP_STATUS:%{http_code}" \
-        "$CHECKIN_URL")
+        "$checkin_url_val" -o "$curl_output_file")
     
-    local HTTP_STATUS=$(echo "$RESULT" | grep HTTP_STATUS | cut -d':' -f2)
-    local RESPONSE=$(echo "$RESULT" | grep -v HTTP_STATUS)
+    local response_body=$(cat "$curl_output_file")
+    rm -f "$curl_output_file"
     
-    if [ "$HTTP_STATUS" == "200" ]; then
+    if [ "$http_code" == "200" ]; then
         log "Sent metrics: HTTP 200 - Success"
-        log_debug "Response: $RESPONSE"
+        log_debug "Response: $response_body"
         
-        # Parse the response to get the new check interval
-        local NEW_CHECK_INTERVAL=$(echo "$RESPONSE" | jq -r '.config.check_interval // empty')
-        if [ ! -z "$NEW_CHECK_INTERVAL" ] && [ "$NEW_CHECK_INTERVAL" != "null" ]; then
-            if [ "$NEW_CHECK_INTERVAL" != "$CHECK_INTERVAL" ]; then
-                log "Updating check interval from $CHECK_INTERVAL to $NEW_CHECK_INTERVAL seconds"
-                CHECK_INTERVAL=$NEW_CHECK_INTERVAL
-                # Update the config file
-                sed -i "s/\"check_interval\": [0-9]*/\"check_interval\": $CHECK_INTERVAL/" "$CONFIG_FILE"
+        if command -v jq &> /dev/null; then
+            local new_check_interval_val=$(echo "$response_body" | jq -r '.config.check_interval // empty')
+            local power_command_val=$(echo "$response_body" | jq -r '.power_command // empty')
+        else # Fallback if jq is not available
+            log_debug "jq not found, using grep for response parsing."
+            local new_check_interval_val=$(echo "$response_body" | grep -oP "\"check_interval\"[[:space:]]*:[[:space:]]*[0-9]+|null" | head -n1)
+            local power_command_val=$(echo "$response_body" | grep -oP "\"power_command\"[[:space:]]*:[[:space:]]*\"\\K[^\"]*\"" | head -n1)
+        fi
+
+        if [ -n "$new_check_interval_val" ] && [ "$new_check_interval_val" != "null" ] && [[ "$new_check_interval_val" =~ ^[0-9]+$ ]]; then
+            if [ "$new_check_interval_val" -ne "$CHECK_INTERVAL" ]; then # Use global CHECK_INTERVAL for comparison
+                log "Updating check interval from $CHECK_INTERVAL to $new_check_interval_val seconds"
+                CHECK_INTERVAL=$new_check_interval_val # Update global CHECK_INTERVAL
+                # Update the config file safely with jq if available, otherwise sed
+                if command -v jq &> /dev/null; then
+                    jq --argjson interval "$new_check_interval_val" '.check_interval = $interval' "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
+                else 
+                    sed -i "s/\"check_interval\":[[:space:]]*[0-9]*/\"check_interval\": $new_check_interval_val/" "$CONFIG_FILE"
+                fi
             fi
         fi
         
-        # Check for power commands in the response
-        local POWER_COMMAND=$(echo "$RESPONSE" | jq -r '.power_command // empty')
-        if [ ! -z "$POWER_COMMAND" ] && [ "$POWER_COMMAND" != "null" ]; then
-            log "Received power command: $POWER_COMMAND"
-            execute_power_command "$POWER_COMMAND"
+        if [ -n "$power_command_val" ] && [ "$power_command_val" != "null" ]; then
+            log "Received power command: $power_command_val"
+            execute_power_command "$power_command_val"
         fi
     else
-        log "Failed to send metrics: HTTP $HTTP_STATUS"
-        log_debug "Error Response: $RESPONSE"
-        log_debug "Request URL: $CHECKIN_URL"
-        log_debug "Request Payload: $DATA"
-        log_debug "API Token: ${API_TOKEN:0:8}...${API_TOKEN: -8}"
+        log "Failed to send metrics: HTTP $http_code"
+        log_debug "Error Response: $response_body"
+        log_debug "Request URL: $checkin_url_val"
+        log_debug "Request Payload: $data_payload"
+        log_debug "API Token (masked): ${api_token_val:0:5}..."
         
-        # If we get a 500 error, try with a simplified payload
-        if [ "$HTTP_STATUS" == "500" ]; then
+        if [ "$http_code" == "500" ]; then
             log "Detected server error (HTTP 500), trying with minimal payload..."
-            local MINIMAL_DATA="{\"hostname\":\"$HOSTNAME\",\"metrics\":$METRICS}"
+            local minimal_data_payload="{\"hostname\":\"$hostname_val\",\"metrics\":$metrics_json}"
             
-            local RETRY_RESULT=$(curl -s -X POST \
+            local retry_curl_output_file=$(mktemp)
+            local retry_http_code=$(curl -L -s -X POST \
                 -H "Content-Type: application/json" \
-                -H "X-API-Token: $API_TOKEN" \
-                -d "$MINIMAL_DATA" \
+                -H "X-API-Token: $api_token_val" \
+                -d "$minimal_data_payload" \
                 -w "\nHTTP_STATUS:%{http_code}" \
-                "$CHECKIN_URL")
-                
-            local RETRY_STATUS=$(echo "$RETRY_RESULT" | grep HTTP_STATUS | cut -d':' -f2)
-            local RETRY_RESPONSE=$(echo "$RETRY_RESULT" | grep -v HTTP_STATUS)
+                "$checkin_url_val" -o "$retry_curl_output_file")
             
-            if [ "$RETRY_STATUS" == "200" ]; then
+            local retry_response_body=$(cat "$retry_curl_output_file")
+            rm -f "$retry_curl_output_file"
+
+            if [ "$retry_http_code" == "200" ]; then
                 log "Minimal payload succeeded (HTTP 200)"
-                log_debug "Response: $RETRY_RESPONSE"
+                log_debug "Response: $retry_response_body"
                 
-                # Also check for check interval update in retry response
-                local NEW_CHECK_INTERVAL=$(echo "$RETRY_RESPONSE" | jq -r '.config.check_interval // empty')
-                if [ ! -z "$NEW_CHECK_INTERVAL" ] && [ "$NEW_CHECK_INTERVAL" != "null" ]; then
-                    if [ "$NEW_CHECK_INTERVAL" != "$CHECK_INTERVAL" ]; then
-                        log "Updating check interval from $CHECK_INTERVAL to $NEW_CHECK_INTERVAL seconds"
-                        CHECK_INTERVAL=$NEW_CHECK_INTERVAL
-                        # Update the config file
-                        sed -i "s/\"check_interval\": [0-9]*/\"check_interval\": $CHECK_INTERVAL/" "$CONFIG_FILE"
+                if command -v jq &> /dev/null; then
+                    local new_check_interval_retry_val=$(echo "$retry_response_body" | jq -r '.config.check_interval // empty')
+                    local power_command_retry_val=$(echo "$retry_response_body" | jq -r '.power_command // empty')
+                else
+                    local new_check_interval_retry_val=$(echo "$retry_response_body" | grep -oP "\"check_interval\"[[:space:]]*:[[:space:]]*[0-9]+|null" | head -n1)
+                    local power_command_retry_val=$(echo "$retry_response_body" | grep -oP "\"power_command\"[[:space:]]*:[[:space:]]*\"\\K[^\"]*\"" | head -n1)
+                fi
+
+                if [ -n "$new_check_interval_retry_val" ] && [ "$new_check_interval_retry_val" != "null" ] && [[ "$new_check_interval_retry_val" =~ ^[0-9]+$ ]]; then
+                    if [ "$new_check_interval_retry_val" -ne "$CHECK_INTERVAL" ]; then
+                        log "Updating check interval from $CHECK_INTERVAL to $new_check_interval_retry_val seconds (after retry)"
+                        CHECK_INTERVAL=$new_check_interval_retry_val
+                        if command -v jq &> /dev/null; then
+                            jq --argjson interval "$new_check_interval_retry_val" '.check_interval = $interval' "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
+                        else
+                            sed -i "s/\"check_interval\":[[:space:]]*[0-9]*/\"check_interval\": $new_check_interval_retry_val/" "$CONFIG_FILE"
+                        fi
                     fi
                 fi
                 
-                # Check for power commands in the retry response
-                local POWER_COMMAND=$(echo "$RETRY_RESPONSE" | jq -r '.power_command // empty')
-                if [ ! -z "$POWER_COMMAND" ] && [ "$POWER_COMMAND" != "null" ]; then
-                    log "Received power command: $POWER_COMMAND"
-                    execute_power_command "$POWER_COMMAND"
+                if [ -n "$power_command_retry_val" ] && [ "$power_command_retry_val" != "null" ]; then
+                    log "Received power command (after retry): $power_command_retry_val"
+                    execute_power_command "$power_command_retry_val"
                 fi
             else
-                log "Minimal payload also failed: HTTP $RETRY_STATUS"
-                log_debug "Response: $RETRY_RESPONSE"
+                log "Minimal payload also failed: HTTP $retry_http_code"
+                log_debug "Response: $retry_response_body"
             fi
         fi
     fi
 }
 
-# Main loop
+# --- Main Agent Logic ---
 log "PulseGuard Agent starting... Version: $AGENT_VERSION"
 
-# Make sure we have the required tools
+# Ensure curl is installed (should be by install script, but double check)
 if ! command -v curl &> /dev/null; then
-    log "ERROR: curl is not installed. Agent cannot function without it."
+    log "CRITICAL: curl is not installed. Agent cannot function. Please install curl and restart."
     exit 1
 fi
 
-# Create log directory if it doesn't exist
+# Ensure jq is installed (attempt to install if missing)
+if ! command -v jq &> /dev/null; then
+    log "INFO: jq is not installed. Attempting to install it as it improves config and response parsing."
+    if command -v apt-get &> /dev/null; then
+        apt-get update && apt-get install -y jq
+    elif command -v yum &> /dev/null; then
+        yum install -y jq
+    else
+        log "WARNING: Could not install jq automatically. Agent will use grep/sed for parsing, which might be less reliable."
+    fi
+    if ! command -v jq &> /dev/null; then
+         log "ERROR: Failed to install jq. Parsing will rely on grep/sed."
+    else
+         log "INFO: jq installed successfully."
+    fi
+fi
+
+# Ensure log directory exists
 if [ ! -d "$(dirname "$LOG_FILE")" ]; then
+    log "INFO: Log directory $(dirname "$LOG_FILE") not found. Creating it."
     mkdir -p "$(dirname "$LOG_FILE")"
     chmod 755 "$(dirname "$LOG_FILE")"
+    touch "$LOG_FILE"
+    chmod 644 "$LOG_FILE"
 fi
 
-# Check that config file exists
-if [ ! -f "$CONFIG_FILE" ]; then
-    log "ERROR: Config file not found at $CONFIG_FILE"
-    
-    # Try to recover by creating default config
-    log "Attempting to create default config file..."
-    mkdir -p "$(dirname "$CONFIG_FILE")"
-    cat > "$CONFIG_FILE" << EOF
-{
-    "api_token": "$API_TOKEN",
-    "api_base_url": "https://app.pulseguard.nl/api",
-    "check_interval": 60,
-    "metrics_enabled": true,
-    "services_monitoring": true
-}
-EOF
-    chmod 644 "$CONFIG_FILE"
-    
-    if [ ! -f "$CONFIG_FILE" ]; then
-        log "Failed to create config file. Agent cannot continue."
-        exit 1
-    else
-        log "Created default config file."
-    fi
+# Load initial configuration for CHECK_INTERVAL
+# Other config values like API_TOKEN and API_BASE_URL are read within functions that need them
+INITIAL_CHECK_INTERVAL=$(get_config_value "check_interval")
+if [[ "$INITIAL_CHECK_INTERVAL" =~ ^[0-9]+$ ]] && [ "$INITIAL_CHECK_INTERVAL" -gt 0 ]; then
+    CHECK_INTERVAL=$INITIAL_CHECK_INTERVAL
+    log "Initialized CHECK_INTERVAL from config: $CHECK_INTERVAL seconds."
+else
+    log "WARNING: Invalid or missing check_interval in config ($INITIAL_CHECK_INTERVAL). Using default: 60 seconds."
+    CHECK_INTERVAL=60 # Default if not found or invalid in config
 fi
 
-API_TOKEN=$(get_config_value "api_token")
-API_BASE_URL=$(get_config_value "api_base_url")
-CHECK_INTERVAL=$(get_config_value "check_interval")
-
-log "Agent Configuration:"
-log "  API URL: $API_BASE_URL"
-log "  API Token: ${API_TOKEN:0:8}...${API_TOKEN:(-8)}" # Show only first/last 8 chars for security
+# Log initial effective configuration (API token will be masked)
+EFFECTIVE_API_TOKEN=$(get_config_value "api_token")
+EFFECTIVE_API_BASE_URL=$(get_config_value "api_base_url")
+log "Effective Agent Configuration Loaded:"
+log "  API URL: $EFFECTIVE_API_BASE_URL"
+log "  API Token: ${EFFECTIVE_API_TOKEN:0:5}..."
 log "  Check Interval: $CHECK_INTERVAL seconds"
 
-# Test API connection before starting
+# Initial API connection test
 if ! test_api_connection; then
-    log "WARNING: Initial API connection test failed. Will continue trying, but check your API token and URL."
-    
-    # Try to reach the server via IP directly
-    log "Attempting to reach server via direct IP..."
-    if ping -c 3 94.228.203.142 &>/dev/null; then
-        log "Can reach server IP. This may be a DNS issue."
+    log "WARNING: Initial API connection test failed. The agent will continue to try, but please verify your API token, URL, and network connectivity."
+    API_HOST_FOR_PING=$(echo "$EFFECTIVE_API_BASE_URL" | sed -E 's|^https?://||' | sed -E 's|/.*$||')
+    IP_FOR_PING="94.228.203.142" # PulseGuard IP for direct test
+    log "Attempting to ping $API_HOST_FOR_PING and $IP_FOR_PING..."
+    if ping -c 1 "$API_HOST_FOR_PING" &>/dev/null; then
+        log "Successfully pinged $API_HOST_FOR_PING. DNS resolution seems OK."
     else
-        log "Cannot reach server IP. This may be a network connectivity issue."
+        log "Failed to ping $API_HOST_FOR_PING. Possible DNS or network issue."
+        if ping -c 1 "$IP_FOR_PING" &>/dev/null; then
+            log "Successfully pinged $IP_FOR_PING. Direct IP connectivity is OK. This points to a DNS issue for $API_HOST_FOR_PING."
+        else
+            log "Failed to ping $IP_FOR_PING. Possible network connectivity issue preventing access to PulseGuard servers."
+        fi
     fi
 fi
 
-if [ -z "$CHECK_INTERVAL" ]; then
-    CHECK_INTERVAL=60
-    log "Check interval not found in config, using default: $CHECK_INTERVAL seconds"
-fi
+log "Agent main loop started. Sending metrics every $CHECK_INTERVAL seconds."
 
-log "Agent started. Sending metrics every $CHECK_INTERVAL seconds."
-
-# Initialize variables for update checking
-LAST_UPDATE_CHECK=0
-UPDATE_CHECK_INTERVAL=3600 # Check for updates every hour (in seconds)
+LAST_METRICS_SEND_ATTEMPT=0
+LAST_UPDATE_CHECK_TS=0 # Timestamp of last update check
+UPDATE_CHECK_FREQUENCY_SECONDS=3600 # How often to check for updates (e.g., 1 hour)
 
 while true; do
-    # Collect metrics
-    collect_metrics
-    
-    # Check for updates periodically
-    CURRENT_TIME=$(date +%s)
-    if [ $((CURRENT_TIME - LAST_UPDATE_CHECK)) -ge $UPDATE_CHECK_INTERVAL ]; then
-        check_for_updates
-        LAST_UPDATE_CHECK=$CURRENT_TIME
+    current_ts=$(date +%s)
+
+    # Collect and send metrics
+    # Ensure we don't send too frequently if interval is very short or on rapid restarts
+    if [ $((current_ts - LAST_METRICS_SEND_ATTEMPT)) -ge $CHECK_INTERVAL ]; then
+        collect_metrics
+        LAST_METRICS_SEND_ATTEMPT=$current_ts
     fi
     
-    sleep $CHECK_INTERVAL
+    # Check for updates periodically
+    if [ $((current_ts - LAST_UPDATE_CHECK_TS)) -ge $UPDATE_CHECK_FREQUENCY_SECONDS ]; then
+        log "Periodic update check due."
+        check_for_updates
+        LAST_UPDATE_CHECK_TS=$current_ts
+    fi
+    
+    # Sleep for a short duration before re-evaluating, to prevent tight loop if CHECK_INTERVAL is 0 or very small
+    # The main sleep will be based on CHECK_INTERVAL. This is just a safety for the loop itself.
+    # Determine effective sleep duration. It should be CHECK_INTERVAL, but we consider the time already spent in the loop.
+    time_spent_in_loop=$(( $(date +%s) - current_ts ))
+    sleep_duration=$((CHECK_INTERVAL - time_spent_in_loop))
+    if [ $sleep_duration -lt 1 ]; then
+        sleep_duration=1 # Minimum sleep of 1s to avoid busy-looping if processing took too long
+    fi
+    
+    log_debug "Loop finished. Sleeping for $sleep_duration seconds (effective interval: $CHECK_INTERVAL)."
+    sleep $sleep_duration
 done
 EOL
 
-chmod +x $INSTALL_DIR/pulseguard-agent
+chmod +x "$INSTALL_DIR/pulseguard-agent"
 
 # Save device information to env file
-echo -e "\e[33mSaving device information...\e[0m"
-mkdir -p $INSTALL_DIR
-cat > $INSTALL_DIR/env << EOL
+echo -e "\\e[33mSaving device information...\\e[0m"
+mkdir -p "$INSTALL_DIR"
+cat > "$INSTALL_DIR/env" << EOL
 DEVICE_UUID=$DEVICE_UUID
 API_TOKEN=$API_TOKEN
 EOL
-chmod 600 $INSTALL_DIR/env
+chmod 600 "$INSTALL_DIR/env"
 
 # Create systemd service
-echo -e "\e[33mCreating systemd service...\e[0m"
-cat > /etc/systemd/system/pulseguard-agent.service << EOL
+echo -e "\\e[33mCreating systemd service...\\e[0m"
+cat > "/etc/systemd/system/pulseguard-agent.service" << EOL
 [Unit]
 Description=PulseGuard Agent Service
-After=network.target
+After=network.target network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/bin/bash /opt/pulseguard/pulseguard-agent
-WorkingDirectory=/opt/pulseguard
+ExecStart=/bin/bash $INSTALL_DIR/pulseguard-agent
+WorkingDirectory=$INSTALL_DIR
 Restart=always
 RestartSec=10
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=pulseguard-agent
 User=root
-Environment="API_TOKEN=$API_TOKEN"
-Environment="DEVICE_UUID=$DEVICE_UUID"
+# Pass necessary original parameters as environment variables to the script
+# The script itself will read its config from config.json primarily
+Environment="PULSEGUARD_DEVICE_UUID=$DEVICE_UUID"
+Environment="PULSEGUARD_API_TOKEN=$API_TOKEN"
 
 [Install]
 WantedBy=multi-user.target
 EOL
 
 # Reload systemd, enable and start service
-echo -e "\e[33mEnabling and starting service...\e[0m"
+echo -e "\\e[33mEnabling and starting service...\\e[0m"
 systemctl daemon-reload
-systemctl enable pulseguard-agent
-systemctl restart pulseguard-agent
+systemctl enable pulseguard-agent.service # Added .service suffix
+systemctl restart pulseguard-agent.service # Added .service suffix
 
 # Check if service is running
-if systemctl is-active --quiet pulseguard-agent; then
-    echo -e "\e[32mPulseGuard Agent service installed and running successfully!\e[0m"
-    echo -e "\e[32mInstallation complete. The agent will now begin reporting system metrics.\e[0m"
-    echo -e "\e[33mTo check logs: sudo journalctl -u pulseguard-agent -f\e[0m"
-    echo -e "\e[33mDetailed logs: sudo cat /opt/pulseguard/logs/agent.log\e[0m"
+if systemctl is-active --quiet pulseguard-agent.service; then # Added .service suffix
+    echo -e "\\e[32mPulseGuard Agent service installed and running successfully!\\e[0m"
+    echo -e "\\e[32mInstallation complete. The agent will now begin reporting system metrics.\\e[0m"
+    echo -e "\\e[33mTo check logs: sudo journalctl -u pulseguard-agent.service -f\\e[0m"
+    echo -e "\\e[33mDetailed logs: sudo cat /opt/pulseguard/logs/agent.log\\e[0m"
 else
-    echo -e "\e[33mService installation completed, but the service is not running.\e[0m"
-    echo -e "\e[33mCheck the logs with: sudo journalctl -u pulseguard-agent\e[0m"
-    echo -e "\e[33mAlso check the agent logs: sudo cat /opt/pulseguard/logs/agent.log\e[0m"
+    echo -e "\\e[31mService installation completed, but the service is not running or failed to start.\\e[0m"
+    echo -e "\\e[33mPlease check the logs for errors:\\e[0m"
+    echo -e "\\e[33msudo journalctl -u pulseguard-agent.service -n 50 --no-pager\\e[0m"
+    echo -e "\\e[33msudo cat /opt/pulseguard/logs/agent.log\\e[0m"
+    echo -e "\\e[33mYou can try to start it manually with: sudo systemctl start pulseguard-agent.service\\e[0m"
 fi
 
 echo ""
-echo -e "\e[36mFor support, visit https://pulseguard.io/support\e[0m" 
+echo -e "\\e[36mFor support, visit https://pulseguard.io/support\\e[0m" 

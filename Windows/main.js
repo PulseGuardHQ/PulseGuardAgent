@@ -8,6 +8,14 @@ const https = require('https');
 const { exec } = require('child_process');
 const AutoLaunch = require('auto-launch');
 
+// Ensure ffmpeg is properly loaded
+try {
+  // Try to load ffmpeg from the static package
+  require('ffmpeg-static');
+} catch (error) {
+  console.error('Failed to load ffmpeg-static:', error.message);
+}
+
 // Global references
 let mainWindow;
 let tray = null;

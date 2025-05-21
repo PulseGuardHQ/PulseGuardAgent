@@ -5,10 +5,12 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "build": "electron-builder",
+    "prebuild": "node copy-ffmpeg.js",
+    "build": "electron-builder --win portable --x64 --config.nsis.differentialPackage=false --config.win.icon=assets/website-icon.png --config.asar=true",
+    "build-nosign": "electron-builder --win --x64 --config.win.signAndEditExecutable=false --config.win.signDlls=false",
     "pack": "electron-builder --dir",
     "dist": "electron-builder",
-    "package-win": "electron-packager . PulseGuardAgent --platform=win32 --arch=x64 --out=dist --overwrite --asar",
+    "package-win": "electron-packager . PulseGuardAgent --platform=win32 --arch=x64 --out=dist --overwrite --asar --extra-resource=node_modules/electron/dist/ffmpeg.dll --extra-resource=node_modules/ffmpeg-static/ffmpeg.exe",
     "postinstall": "electron-builder install-app-deps"
   },
   "author": "PulseGuard",
@@ -20,35 +22,23 @@
   },
   "dependencies": {
     "auto-launch": "^5.0.5",
+    "ffmpeg-static": "^5.2.0",
     "systeminformation": "^5.18.10"
   },
   "build": {
     "appId": "com.pulseguard.agent",
     "productName": "PulseGuard Agent",
-    "artifactName": "PulseGuardAgent-Setup-${version}.${ext}",
-    "win": {
-      "target": "nsis",
-      "icon": "assets/icon.ico"
-    },
-    "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
-      "runAfterFinish": true,
-      "installerIcon": "assets/icon.ico",
-      "uninstallerIcon": "assets/icon.ico",
-      "createDesktopShortcut": true,
-      "createStartMenuShortcut": true,
-      "license": "license.txt",
-      "shortcutName": "PulseGuard Agent",
-      "perMachine": true,
-      "include": "installer.nsh"
-    },
-    "extraResources": [
-      {
-        "from": "license.txt",
-        "to": "license.txt"
-      }
+    "artifactName": "PulseGuardAgent-${version}.${ext}",
+    "asar": true,
+    "asarUnpack": [
+      "node_modules/ffmpeg-static/**/*"
     ],
+    "buildDependenciesFromSource": true,
+    "nodeGypRebuild": false,
+    "npmRebuild": false,
+    "directories": {
+      "output": "dist"
+    },
     "files": [
       "**/*",
       "!**/node_modules/*/{CHANGELOG.md,README.md,README,readme.md,readme}",
@@ -57,6 +47,35 @@
       "!**/node_modules/.bin",
       "!**/.{idea,git,cache,github,vscode}",
       "!**/{.DS_Store,.git,.gitignore,.npmignore}"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "assets/website-icon.png",
+      "extraResources": [
+        "node_modules/ffmpeg-static/**/*"
+      ],
+      "signAndEditExecutable": false,
+      "signDlls": false,
+      "artifactName": "PulseGuardAgent-${version}.exe"
+    },
+    "portable": {
+      "artifactName": "PulseGuardAgent-${version}.exe",
+      "requestExecutionLevel": "admin"
+    },
+    "extraResources": [
+      {
+        "from": "node_modules/electron/dist/ffmpeg.dll",
+        "to": "ffmpeg.dll"
+      },
+      {
+        "from": "node_modules/ffmpeg-static/ffmpeg.exe",
+        "to": "ffmpeg.exe"
+      }
     ]
   }
-} 
+}
