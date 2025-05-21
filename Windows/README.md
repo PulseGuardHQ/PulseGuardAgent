@@ -9,6 +9,7 @@ This is the Windows agent application for PulseGuard monitoring services. It col
 - Automatically starts with Windows
 - Adjustable check interval
 - Full system information collection
+- Power management capabilities (restart, shutdown, sleep, lock)
 
 ## Requirements
 
@@ -62,6 +63,19 @@ Configuration is stored in `%PROGRAMDATA%\PulseGuard\config.json` and includes:
 - Device UUID
 - Check interval
 - API URL
+
+## Power Management
+
+The PulseGuard Agent supports remote power management features:
+
+- **Lock** - Locks the computer
+- **Sleep** - Puts the computer into sleep mode
+- **Restart** - Restarts the computer with a 5-second delay
+- **Shutdown** - Shuts down the computer with a 5-second delay
+
+These commands can be sent from the PulseGuard dashboard and will be executed during the next agent check-in.
+
+**Note:** Power management commands require administrative privileges. Make sure the agent is installed and running with the appropriate permissions.
 
 ## Troubleshooting
 

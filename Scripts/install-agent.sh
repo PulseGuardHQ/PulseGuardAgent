@@ -254,7 +254,7 @@ function get_cpu_usage() {
 
         local total_delta=$((total_after - total_before))
         local idle_delta=$((idle_after - idle_before))
-
+        
         if [ $total_delta -eq 0 ]; then
             echo "0"
         else
@@ -347,7 +347,7 @@ function test_api_connection() {
 function check_for_updates() {
     local api_token_val=$(get_config_value "api_token")
     local api_base_url_val=$(get_config_value "api_base_url")
-
+    
     if [ -z "$api_token_val" ] || [ -z "$api_base_url_val" ]; then
         log "ERROR: Missing API token or base URL in configuration for update check."
         return 1
@@ -462,7 +462,7 @@ if cp "$SOURCE_AGENT_FILE" "$TARGET_AGENT_FILE"; then
         else
             write_to_log "Failed to restart agent via service command. Exit code: $?"
         fi
-    else
+else
         write_to_log "Could not automatically restart service. Please restart pulseguard-agent manually."
     fi
     write_to_log "Update completed successfully! Exiting update script."
@@ -552,7 +552,7 @@ function collect_metrics() {
                     jq --argjson interval "$new_check_interval_val" '.check_interval = $interval' "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
                 else 
                     sed -i "s/\"check_interval\":[[:space:]]*[0-9]*/\"check_interval\": $new_check_interval_val/" "$CONFIG_FILE"
-                fi
+            fi
             fi
         fi
         
@@ -602,7 +602,7 @@ function collect_metrics() {
                             jq --argjson interval "$new_check_interval_retry_val" '.check_interval = $interval' "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
                         else
                             sed -i "s/\"check_interval\":[[:space:]]*[0-9]*/\"check_interval\": $new_check_interval_retry_val/" "$CONFIG_FILE"
-                        fi
+                    fi
                     fi
                 fi
                 
@@ -702,7 +702,7 @@ while true; do
     # Collect and send metrics
     # Ensure we don't send too frequently if interval is very short or on rapid restarts
     if [ $((current_ts - LAST_METRICS_SEND_ATTEMPT)) -ge $CHECK_INTERVAL ]; then
-        collect_metrics
+    collect_metrics
         LAST_METRICS_SEND_ATTEMPT=$current_ts
     fi
     

@@ -299,15 +299,32 @@ function executePowerCommand(action) {
     
     // Check if the command is supported
     if (commands[action]) {
+      logToFile(`Executing command: ${commands[action]}`, 'DEBUG');
+      
       exec(commands[action], (error, stdout, stderr) => {
         if (error) {
           logToFile(`Failed to execute power command: ${error.message}`, 'ERROR');
+          logToFile(`Command output: ${stdout}`, 'DEBUG');
+          logToFile(`Command error: ${stderr}`, 'DEBUG');
+          
+          // Try to diagnose permission issues
+          isAdmin().then(adminStatus => {
+            logToFile(`Admin rights check: ${adminStatus ? 'Running as admin' : 'NOT running as admin'}`, 'INFO');
+            if (!adminStatus) {
+              logToFile('Power commands may require administrative privileges. Check your agent installation.', 'WARN');
+            }
+          });
           return;
         }
+        
+        if (stdout) logToFile(`Command stdout: ${stdout}`, 'DEBUG');
+        if (stderr) logToFile(`Command stderr: ${stderr}`, 'DEBUG');
+        
         logToFile(`Power command executed successfully: ${action}`, 'INFO');
       });
     } else {
       logToFile(`Unsupported power command: ${action}`, 'ERROR');
+      logToFile(`Supported commands are: ${Object.keys(commands).join(', ')}`, 'INFO');
     }
   } catch (error) {
     logToFile(`Error executing power command: ${error.message}`, 'ERROR');
@@ -755,6 +772,9 @@ async function collectAndSendMetrics(forceFullUpdate = false) {
       
       logToFile('Metrics sent successfully');
       
+      // Log response details for debugging
+      logApiResponse(response);
+      
       // Check for configuration updates from server response
       if (response.body.config) {
         if (response.body.config.check_interval && response.body.config.check_interval !== config.check_interval) {
@@ -772,7 +792,23 @@ async function collectAndSendMetrics(forceFullUpdate = false) {
       
       // Check for power commands from server
       if (response.body.power_command) {
-        const powerAction = response.body.power_command;
+        // Extract the action from the power_command object
+        const powerCommand = response.body.power_command;
+        let powerAction;
+        
+        if (typeof powerCommand === 'string') {
+          // Handle case where it's a direct string for backward compatibility
+          powerAction = powerCommand;
+        } else if (typeof powerCommand === 'object' && powerCommand.action) {
+          // Handle case where it's an object with action and requested_at
+          powerAction = powerCommand.action;
+          const requestedAt = powerCommand.requested_at ? new Date(powerCommand.requested_at) : new Date();
+          logToFile(`Power command was requested at: ${requestedAt.toISOString()}`);
+        } else {
+          logToFile(`Invalid power command format received: ${JSON.stringify(powerCommand)}`, 'ERROR');
+          return;
+        }
+        
         logToFile(`Power command received from API: ${powerAction}`);
         executePowerCommand(powerAction);
       }
@@ -999,4 +1035,31 @@ if (!gotTheLock) {
       mainWindow.focus();
     }
   });
+}
+
+// Log important API responses for troubleshooting
+function logApiResponse(response) {
+  try {
+    if (!response || !response.body) {
+      logToFile('Empty API response received', 'WARN');
+      return;
+    }
+    
+    // Log power command status
+    if (response.body.power_command) {
+      logToFile(`Power command in response: ${JSON.stringify(response.body.power_command)}`, 'DEBUG');
+    }
+    
+    // Log config updates
+    if (response.body.config) {
+      logToFile(`Config in response: ${JSON.stringify(response.body.config)}`, 'DEBUG');
+    }
+    
+    // Log restart flag
+    if (response.body.restart_required) {
+      logToFile('Restart required flag is set in response', 'DEBUG');
+    }
+  } catch (error) {
+    logToFile(`Error logging API response: ${error.message}`, 'ERROR');
+  }
 } 
