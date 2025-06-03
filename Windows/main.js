@@ -53,7 +53,8 @@ let config = {
   ssh_enabled: false,
   ssh_port: 22,
   auto_update_check: true, // Enable automatic update checking
-  update_check_interval: 24 // Check for updates every 24 hours
+  update_check_interval: 24, // Check for updates every 24 hours
+  auto_cleanup_old_versions: true // Enable automatic cleanup of old versions
 };
 
 // Ensure directories exist
@@ -1135,7 +1136,7 @@ ipcMain.on('update-api-url', async (event, apiUrl) => {
         logToFile('API connection test successful with new URL');
         event.reply('settings-saved');
       } else {
-        logToFile('API connection test failed with new URL, but saved anyway', 'WARN');
+        logToFile('API connection test failed with new URL, maar toch opgeslagen', 'WARN');
         event.reply('settings-error', 'Kon geen verbinding maken met de nieuwe URL. De instelling is wel opgeslagen, maar check of de server juist is geconfigureerd.');
       }
       
@@ -1201,6 +1202,11 @@ app.on('ready', async () => {
   
   // Start update checker
   startUpdateChecker();
+  
+  // Perform cleanup of old versions (delayed to not slow down startup)
+  setTimeout(() => {
+    performOldVersionCleanup();
+  }, 10000); // Wait 10 seconds after startup
 });
 
 // Handle window activation
@@ -1344,6 +1350,11 @@ function checkForUpdates() {
           if (isNewerVersion(latestVersion, currentVersion)) {
             logToFile(`New version available: ${latestVersion}`);
             
+            // Perform cleanup of old versions when new version is detected
+            setTimeout(() => {
+              performOldVersionCleanup();
+            }, 2000); // Wait 2 seconds before cleanup
+            
             // Show notification in tray
             if (tray) {
               tray.displayBalloon({
@@ -1475,3 +1486,175 @@ function startUpdateChecker() {
   
   logToFile('Update checker started');
 }
+
+// Function to clean up old installation files
+function cleanupOldVersions() {
+  try {
+    logToFile('Starting cleanup of old PulseGuard versions...');
+    
+    // Common installation directories where old versions might be stored
+    const commonDirs = [
+      path.join(os.homedir(), 'AppData', 'Local', 'Programs'),
+      path.join(process.env.PROGRAMFILES || 'C:\\Program Files'),
+      path.join(process.env['PROGRAMFILES(X86)'] || 'C:\\Program Files (x86)'),
+      path.join(os.homedir(), 'Downloads')
+    ];
+    
+    // Patterns to look for old PulseGuard files
+    const pulseguardPatterns = [
+      /PulseGuardAgent.*\.exe$/i,
+      /PulseGuard.*Agent.*\.exe$/i,
+      /pulseguard.*agent.*\.exe$/i
+    ];
+    
+    for (const dir of commonDirs) {
+      if (fs.existsSync(dir)) {
+        cleanupDirectory(dir, pulseguardPatterns);
+      }
+    }
+    
+    // Also cleanup temporary directories
+    const tempDirs = [
+      os.tmpdir(),
+      path.join(os.homedir(), 'AppData', 'Local', 'Temp')
+    ];
+    
+    for (const tempDir of tempDirs) {
+      if (fs.existsSync(tempDir)) {
+        cleanupDirectory(tempDir, pulseguardPatterns);
+      }
+    }
+    
+    logToFile('Old version cleanup completed');
+  } catch (error) {
+    logToFile(`Error during old version cleanup: ${error.message}`, 'ERROR');
+  }
+}
+
+function cleanupDirectory(directory, patterns) {
+  try {
+    const files = fs.readdirSync(directory);
+    const currentExecutable = process.execPath;
+    
+    for (const file of files) {
+      const fullPath = path.join(directory, file);
+      
+      // Skip if it's the current running executable
+      if (fullPath === currentExecutable) {
+        continue;
+      }
+      
+      // Check if file matches any of the patterns
+      const matchesPattern = patterns.some(pattern => pattern.test(file));
+      
+      if (matchesPattern) {
+        try {
+          const stats = fs.statSync(fullPath);
+          
+          // Only delete files that are older than 1 hour (to avoid deleting currently downloading files)
+          const oneHourAgo = Date.now() - (60 * 60 * 1000);
+          if (stats.mtime.getTime() < oneHourAgo) {
+            fs.unlinkSync(fullPath);
+            logToFile(`Removed old version file: ${fullPath}`);
+          } else {
+            logToFile(`Skipping recent file: ${fullPath}`, 'DEBUG');
+          }
+        } catch (deleteError) {
+          // File might be in use or protected, log but don't fail
+          logToFile(`Could not delete ${fullPath}: ${deleteError.message}`, 'DEBUG');
+        }
+      }
+    }
+  } catch (error) {
+    logToFile(`Error scanning directory ${directory}: ${error.message}`, 'DEBUG');
+  }
+}
+
+// Function to cleanup old PulseGuard registry entries (Windows)
+function cleanupOldRegistryEntries() {
+  if (process.platform !== 'win32') return;
+  
+  try {
+    logToFile('Cleaning up old registry entries...');
+    
+    // Common registry paths where old versions might be registered
+    const registryPaths = [
+      'HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
+      'HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
+      'HKEY_LOCAL_MACHINE\\Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall'
+    ];
+    
+    for (const regPath of registryPaths) {
+      const command = `reg query "${regPath}" /f "PulseGuard" /s`;
+      
+      exec(command, (error, stdout, stderr) => {
+        if (!error && stdout) {
+          // Parse the output to find old PulseGuard entries
+          const lines = stdout.split('\n');
+          for (const line of lines) {
+            if (line.includes('PulseGuard') && line.includes('HKEY_')) {
+              const keyPath = line.trim();
+              
+              // Check if this is an old version by querying the version
+              exec(`reg query "${keyPath}" /v "DisplayVersion"`, (versionError, versionStdout) => {
+                if (!versionError && versionStdout) {
+                  const versionMatch = versionStdout.match(/DisplayVersion\s+REG_SZ\s+([\d.]+)/);
+                  if (versionMatch) {
+                    const installedVersion = versionMatch[1];
+                    if (isNewerVersion(AGENT_VERSION, installedVersion)) {
+                      // This is an older version, remove it
+                      exec(`reg delete "${keyPath}" /f`, (deleteError) => {
+                        if (!deleteError) {
+                          logToFile(`Removed old registry entry: ${keyPath} (version ${installedVersion})`);
+                        } else {
+                          logToFile(`Could not remove registry entry ${keyPath}: ${deleteError.message}`, 'DEBUG');
+                        }
+                      });
+                    }
+                  }
+                }
+              });
+            }
+          }
+        }
+      });
+    }
+  } catch (error) {
+    logToFile(`Error during registry cleanup: ${error.message}`, 'ERROR');
+  }
+}
+
+// Function to perform complete cleanup of old versions
+function performOldVersionCleanup() {
+  if (!config.auto_cleanup_old_versions) {
+    logToFile('Automatic cleanup of old versions is disabled');
+    return;
+  }
+  
+  logToFile('Performing comprehensive cleanup of old PulseGuard versions...');
+  
+  // Cleanup files
+  cleanupOldVersions();
+  
+  // Cleanup registry entries (Windows only)
+  if (process.platform === 'win32') {
+    cleanupOldRegistryEntries();
+  }
+  
+  logToFile('Old version cleanup process completed');
+}
+
+// Cleanup old versions from UI
+ipcMain.on('cleanup-old-versions', async (event) => {
+  try {
+    logToFile('Manual cleanup of old versions requested from UI');
+    performOldVersionCleanup();
+    event.reply('cleanup-result', { success: true });
+  } catch (error) {
+    logToFile(`Manual cleanup failed: ${error.message}`, 'ERROR');
+    event.reply('cleanup-result', { 
+      success: false, 
+      error: error.message 
+    });
+  }
+});

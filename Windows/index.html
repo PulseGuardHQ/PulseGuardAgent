@@ -295,6 +295,7 @@
           
           <div class="button-group">
             <button id="check-updates-button" class="secondary-button">Check for Updates</button>
+            <button id="cleanup-old-versions-button" class="secondary-button">Cleanup Old Versions</button>
           </div>
           
           <div id="update-notification" class="notification-area hidden"></div>
@@ -402,6 +403,7 @@
     const currentVersionSpan = document.getElementById('current-version');
     const updateStatusP = document.getElementById('update-status');
     const checkUpdatesButton = document.getElementById('check-updates-button');
+    const cleanupOldVersionsButton = document.getElementById('cleanup-old-versions-button');
     const updateNotification = document.getElementById('update-notification');
     
     // Tab Navigation
@@ -480,6 +482,14 @@
       hideUpdateNotification();
       
       ipcRenderer.send('check-for-updates');
+    });
+
+    // Cleanup old versions button handler
+    cleanupOldVersionsButton.addEventListener('click', () => {
+      cleanupOldVersionsButton.disabled = true;
+      cleanupOldVersionsButton.textContent = 'Cleaning...';
+      
+      ipcRenderer.send('cleanup-old-versions');
     });
 
     // Tab click handlers
@@ -635,6 +645,18 @@
       // Re-enable button
       saveSettingsButton.disabled = false;
       saveSettingsButton.textContent = 'Instellingen Opslaan';
+    });
+    
+    // Cleanup result handler
+    ipcRenderer.on('cleanup-result', (event, result) => {
+      cleanupOldVersionsButton.disabled = false;
+      cleanupOldVersionsButton.textContent = 'Cleanup Old Versions';
+      
+      if (result.success) {
+        showUpdateNotification('Old versions have been cleaned up successfully!', 'success');
+      } else {
+        showUpdateNotification(`Cleanup failed: ${result.error}`, 'error');
+      }
     });
     
     // Helper functions
