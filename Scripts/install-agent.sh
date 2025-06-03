@@ -139,8 +139,8 @@ function get_config_value() {
     
     if ! command -v jq &> /dev/null; then
         log_debug "jq is not available for parsing config. Using grep/sed fallback."
-        # Fallback using grep/sed if jq is not available
-        local value=$(grep -oP "\"$key\"[[:space:]]*:[[:space:]]*\"\\K[^\"]*\"" "$CONFIG_FILE")
+        # Improved fallback using grep/sed if jq is not available
+        local value=$(grep -oP "\"$key\"[[:space:]]*:[[:space:]]*\"\\K[^\"]*" "$CONFIG_FILE")
         if [ -n "$value" ]; then
             echo "$value"
             return 0
@@ -181,6 +181,8 @@ function execute_power_command() {
     local restart_cmd="shutdown -r now"
     local shutdown_cmd="shutdown -h now"
     local sleep_cmd="systemctl suspend"
+    local hibernate_cmd="systemctl hibernate"
+    
     # Attempt to find a suitable lock command
     local lock_cmd=""
     if command -v loginctl &>/dev/null; then
@@ -195,8 +197,10 @@ function execute_power_command() {
         lock_cmd="cinnamon-screensaver-command -l"
     elif command -v xdg-screensaver &>/dev/null; then
         lock_cmd="xdg-screensaver lock"
+    elif command -v xset &>/dev/null && [ -n "$DISPLAY" ]; then
+        lock_cmd="xset s activate"
     else
-        log "No common lock command found. Lock functionality may not work."
+        log "No suitable lock command found. Lock functionality may not work."
     fi
 
     case "$action" in
@@ -214,6 +218,16 @@ function execute_power_command() {
                 eval "$sleep_cmd"
             else
                 log "systemctl suspend not available or system not in a suspendable state."
+                return 1
+            fi
+            ;;
+        "hibernate")
+            if command -v systemctl &>/dev/null && [[ "$(systemctl is-system-running)" =~ (running|degraded) ]]; then
+                log "Executing system hibernate command: $hibernate_cmd"
+                eval "$hibernate_cmd"
+            else
+                log "systemctl hibernate not available or system not in a hibernatable state."
+                return 1
             fi
             ;;
         "lock")
@@ -511,10 +525,7 @@ function collect_metrics() {
         os_version_val=$(grep "^VERSION_ID=" /etc/os-release | cut -d= -f2 | tr -d '"')
     fi
     
-    local metrics_json="{\"cpu_usage\":$cpu_usage_val,\"memory_usage\":$memory_usage_val,\"disk_usage\":$disk_usage_val,\"uptime\":$uptime_val}"
-    local system_specs_json="{\"cpu_cores\":$(nproc || echo 1),\"total_memory\":$(free -m | grep Mem | awk '{print $2}' || echo 1024)}"
-    local data_payload="{\"hostname\":\"$hostname_val\",\"ip_address\":\"$ip_addr_val\",\"mac_address\":\"$mac_addr_val\",\"os_type\":\"$os_type_val\",\"os_version\":\"$os_version_val\",\"system_specs\":$system_specs_json,\"metrics\":$metrics_json}"
-    
+    # Get API configuration first
     local api_token_val=$(get_config_value "api_token")
     local api_base_url_val=$(get_config_value "api_base_url")
     
@@ -522,6 +533,11 @@ function collect_metrics() {
         log "ERROR: API token or base URL missing in config. Cannot send metrics."
         return 1
     fi
+    
+    log_debug "API Token (masked): ${api_token_val:0:5}..."
+    
+    # Create payload in the format expected by the API (metrics at top level, not nested)
+    local data_payload="{\"token\":\"$api_token_val\",\"hostname\":\"$hostname_val\",\"cpu_usage\":$cpu_usage_val,\"memory_usage\":$memory_usage_val,\"disk_usage\":$disk_usage_val,\"uptime_seconds\":$uptime_val,\"ip_address\":\"$ip_addr_val\",\"os_version\":\"$os_version_val\"}"
     
     local checkin_url_val="$api_base_url_val/devices/check-in"
     
@@ -543,13 +559,24 @@ function collect_metrics() {
         log "Sent metrics: HTTP 200 - Success"
         log_debug "Response: $response_body"
         
+        # Debug: Log power command detection
+        if echo "$response_body" | grep -q "power_command"; then
+            log_debug "Power command detected in response"
+        else
+            log_debug "No power command in response"
+        fi
+        
         if command -v jq &> /dev/null; then
             local new_check_interval_val=$(echo "$response_body" | jq -r '.config.check_interval // empty')
-            local power_command_val=$(echo "$response_body" | jq -r '.power_command // empty')
+            local power_command_val=$(echo "$response_body" | jq -r '.power_command.action // .power_command // empty')
         else # Fallback if jq is not available
             log_debug "jq not found, using grep for response parsing."
-            local new_check_interval_val=$(echo "$response_body" | grep -oP "\"check_interval\"[[:space:]]*:[[:space:]]*[0-9]+|null" | head -n1)
-            local power_command_val=$(echo "$response_body" | grep -oP "\"power_command\"[[:space:]]*:[[:space:]]*\"\\K[^\"]*\"" | head -n1)
+            local new_check_interval_val=$(echo "$response_body" | grep -oP "\"check_interval\"[[:space:]]*:[[:space:]]*[0-9]+" | grep -oP "[0-9]+" | head -n1)
+            local power_command_val=$(echo "$response_body" | grep -oP "\"action\"[[:space:]]*:[[:space:]]*\"\\K[^\"]*" | head -n1)
+            if [ -z "$power_command_val" ]; then
+                # Fallback for direct power_command string
+                power_command_val=$(echo "$response_body" | grep -oP "\"power_command\"[[:space:]]*:[[:space:]]*\"\\K[^\"]*" | head -n1)
+            fi
         fi
 
         if [ -n "$new_check_interval_val" ] && [ "$new_check_interval_val" != "null" ] && [[ "$new_check_interval_val" =~ ^[0-9]+$ ]]; then
@@ -565,7 +592,7 @@ function collect_metrics() {
             fi
         fi
         
-        if [ -n "$power_command_val" ] && [ "$power_command_val" != "null" ]; then
+        if [ -n "$power_command_val" ] && [ "$power_command_val" != "null" ] && [ "$power_command_val" != "empty" ]; then
             log "Received power command: $power_command_val"
             execute_power_command "$power_command_val"
         fi
@@ -578,7 +605,7 @@ function collect_metrics() {
         
         if [ "$http_code" == "500" ]; then
             log "Detected server error (HTTP 500), trying with minimal payload..."
-            local minimal_data_payload="{\"hostname\":\"$hostname_val\",\"metrics\":$metrics_json}"
+            local minimal_data_payload="{\"token\":\"$api_token_val\",\"hostname\":\"$hostname_val\",\"cpu_usage\":$cpu_usage_val,\"memory_usage\":$memory_usage_val,\"disk_usage\":$disk_usage_val,\"uptime_seconds\":$uptime_val}"
             
             local retry_curl_output_file=$(mktemp)
             local retry_http_code=$(curl -L -s -X POST \
@@ -597,10 +624,14 @@ function collect_metrics() {
                 
                 if command -v jq &> /dev/null; then
                     local new_check_interval_retry_val=$(echo "$retry_response_body" | jq -r '.config.check_interval // empty')
-                    local power_command_retry_val=$(echo "$retry_response_body" | jq -r '.power_command // empty')
+                    local power_command_retry_val=$(echo "$retry_response_body" | jq -r '.power_command.action // .power_command // empty')
                 else
-                    local new_check_interval_retry_val=$(echo "$retry_response_body" | grep -oP "\"check_interval\"[[:space:]]*:[[:space:]]*[0-9]+|null" | head -n1)
-                    local power_command_retry_val=$(echo "$retry_response_body" | grep -oP "\"power_command\"[[:space:]]*:[[:space:]]*\"\\K[^\"]*\"" | head -n1)
+                    local new_check_interval_retry_val=$(echo "$retry_response_body" | grep -oP "\"check_interval\"[[:space:]]*:[[:space:]]*[0-9]+" | grep -oP "[0-9]+" | head -n1)
+                    local power_command_retry_val=$(echo "$retry_response_body" | grep -oP "\"action\"[[:space:]]*:[[:space:]]*\"\\K[^\"]*" | head -n1)
+                    if [ -z "$power_command_retry_val" ]; then
+                        # Fallback for direct power_command string
+                        power_command_retry_val=$(echo "$retry_response_body" | grep -oP "\"power_command\"[[:space:]]*:[[:space:]]*\"\\K[^\"]*" | head -n1)
+                    fi
                 fi
 
                 if [ -n "$new_check_interval_retry_val" ] && [ "$new_check_interval_retry_val" != "null" ] && [[ "$new_check_interval_retry_val" =~ ^[0-9]+$ ]]; then
@@ -615,7 +646,7 @@ function collect_metrics() {
                     fi
                 fi
                 
-                if [ -n "$power_command_retry_val" ] && [ "$power_command_retry_val" != "null" ]; then
+                if [ -n "$power_command_retry_val" ] && [ "$power_command_retry_val" != "null" ] && [ "$power_command_retry_val" != "empty" ]; then
                     log "Received power command (after retry): $power_command_retry_val"
                     execute_power_command "$power_command_retry_val"
                 fi
