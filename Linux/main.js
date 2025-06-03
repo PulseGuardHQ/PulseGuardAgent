@@ -5,9 +5,8 @@ const si = require('systeminformation');
 const os = require('os');
 const { networkInterfaces } = require('os');
 const https = require('https');
-const http = require('http');
 const { exec } = require('child_process');
-const AutoLaunch = require('auto-launch');
+const Service = require('node-linux').Service;
 
 // Ensure ffmpeg is properly loaded
 try {
@@ -25,9 +24,11 @@ let metricsInterval = null;
 let updateCheckInterval = null;
 
 // Config and paths
-const installDir = process.env.PROGRAMDATA + '\\PulseGuard';
-const configFile = installDir + '\\config.json';
-const logFile = installDir + '\\logs\\agent.log';
+const homeDir = os.homedir();
+const installDir = '/etc/pulseguard';
+const userConfigDir = homeDir + '/.config/pulseguard';
+const configFile = userConfigDir + '/config.json';
+const logFile = '/var/log/pulseguard/agent.log';
 
 // Metrics collection state variables
 let lastSendTime = new Date(0);
@@ -42,7 +43,7 @@ const AGENT_VERSION = app.getVersion() || '1.0.0';
 let config = {
   api_token: '',
   device_uuid: '',
-  api_base_url: 'http://127.0.0.1:8000',
+  api_base_url: 'https://app.pulseguard.nl',
   check_interval: 15,
   full_check_interval: 86400,
   metrics_enabled: true,
@@ -52,12 +53,26 @@ let config = {
 
 // Ensure directories exist
 function ensureDirectories() {
-  if (!fs.existsSync(installDir)) {
-    fs.mkdirSync(installDir, { recursive: true });
-  }
-  
-  if (!fs.existsSync(installDir + '\\logs')) {
-    fs.mkdirSync(installDir + '\\logs', { recursive: true });
+  try {
+    // Create user config directory if it doesn't exist
+    if (!fs.existsSync(userConfigDir)) {
+      fs.mkdirSync(userConfigDir, { recursive: true });
+    }
+    
+    // Try to create system directories if running as root
+    if (process.getuid && process.getuid() === 0) {
+      if (!fs.existsSync(installDir)) {
+        fs.mkdirSync(installDir, { recursive: true });
+      }
+      
+      if (!fs.existsSync('/var/log/pulseguard')) {
+        fs.mkdirSync('/var/log/pulseguard', { recursive: true });
+      }
+    } else {
+      console.log('Not running as root, skipping system directory creation');
+    }
+  } catch (error) {
+    console.error('Failed to create directories:', error);
   }
 }
 
@@ -66,7 +81,21 @@ function logToFile(message, level = 'INFO') {
   try {
     const timestamp = new Date().toISOString().replace('T', ' ').substr(0, 19);
     const logMessage = `${timestamp} [${level}] ${message}\n`;
-    fs.appendFileSync(logFile, logMessage);
+    
+    // Try to write to system log file first
+    try {
+      if (fs.existsSync('/var/log/pulseguard')) {
+        fs.appendFileSync(logFile, logMessage);
+        console.log(message);
+        return;
+      }
+    } catch (e) {
+      // Fallback to user directory if system log fails
+    }
+    
+    // Fallback to user directory
+    const userLogFile = userConfigDir + '/agent.log';
+    fs.appendFileSync(userLogFile, logMessage);
     console.log(message);
   } catch (error) {
     console.error('Failed to write to log file:', error);
@@ -76,6 +105,7 @@ function logToFile(message, level = 'INFO') {
 // Load configuration from file
 function loadConfig() {
   try {
+    // Try system config first
     if (fs.existsSync(configFile)) {
       const fileContents = fs.readFileSync(configFile, 'utf8');
       const loadedConfig = JSON.parse(fileContents);
@@ -105,42 +135,71 @@ function saveConfig() {
   }
 }
 
-// Check if running as administrator (Windows)
-function isAdmin() {
-  return new Promise((resolve) => {
-    if (process.platform !== 'win32') {
-      resolve(false);
-      return;
-    }
-
-    exec('net session', (error) => {
-      resolve(!error);
-    });
-  });
+// Check if running as root user
+function isRoot() {
+  return process.getuid && process.getuid() === 0;
 }
 
-// Set up auto launch
+// Set up service for autostart
 function setupAutoLaunch() {
-  const autoLauncher = new AutoLaunch({
-    name: 'PulseGuard Agent',
-    path: process.execPath,
-    isHidden: true,
-    args: ['--startup']
-  });
+  try {
+    // Create a systemd service file for autostart
+    const serviceScript = `
+[Unit]
+Description=PulseGuard Agent
+After=network.target
 
-  autoLauncher.isEnabled().then((isEnabled) => {
-    if (!isEnabled) {
-      autoLauncher.enable().then(() => {
-        logToFile('Auto-launch enabled');
-      }).catch((err) => {
-        logToFile(`Failed to enable auto-launch: ${err.message}`, 'ERROR');
+[Service]
+ExecStart=${process.execPath}
+Restart=on-failure
+RestartSec=10
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=pulseguard
+User=${os.userInfo().username}
+Environment=DISPLAY=:0
+
+[Install]
+WantedBy=multi-user.target
+`;
+
+    // Only attempt to create service if running as root
+    if (isRoot()) {
+      const serviceFilePath = '/etc/systemd/system/pulseguard.service';
+      fs.writeFileSync(serviceFilePath, serviceScript);
+      
+      // Enable and start the service
+      exec('systemctl daemon-reload && systemctl enable pulseguard', (error) => {
+        if (error) {
+          logToFile(`Failed to enable service: ${error.message}`, 'ERROR');
+        } else {
+          logToFile('Service enabled successfully', 'INFO');
+        }
       });
     } else {
-      logToFile('Auto-launch is already enabled');
+      // Create a user-level autostart file
+      const autostartDir = homeDir + '/.config/autostart';
+      if (!fs.existsSync(autostartDir)) {
+        fs.mkdirSync(autostartDir, { recursive: true });
+      }
+      
+      const desktopEntry = `
+[Desktop Entry]
+Type=Application
+Name=PulseGuard Agent
+Exec=${process.execPath}
+Icon=${path.join(__dirname, 'assets/website-icon.png')}
+Comment=PulseGuard monitoring agent
+X-GNOME-Autostart-enabled=true
+Hidden=false
+`;
+      
+      fs.writeFileSync(autostartDir + '/pulseguard.desktop', desktopEntry);
+      logToFile('Added to user autostart', 'INFO');
     }
-  }).catch((err) => {
-    logToFile(`Auto-launch setup error: ${err.message}`, 'ERROR');
-  });
+  } catch (error) {
+    logToFile(`Error setting up autolaunch: ${error.message}`, 'ERROR');
+  }
 }
 
 // Create main window
@@ -183,7 +242,7 @@ function createTray() {
     { 
       label: 'Power Management',
       submenu: [
-        { label: 'Lock Computer', click: () => { executePowerCommand('lock'); } },
+        { label: 'Lock Screen', click: () => { executePowerCommand('lock'); } },
         { label: 'Sleep', click: () => { executePowerCommand('sleep'); } },
         { label: 'Restart', click: () => { 
           dialog.showMessageBox({
@@ -292,13 +351,25 @@ function executePowerCommand(action) {
   try {
     logToFile(`Executing power command: ${action}`, 'INFO');
     
-    // Define commands for Windows
+    // Define commands for Linux
     const commands = {
-      'restart': 'shutdown /r /t 5',
-      'shutdown': 'shutdown /s /t 5',
-      'sleep': 'rundll32.exe powrprof.dll,SetSuspendState 0,1,0',
-      'lock': 'rundll32.exe user32.dll,LockWorkStation'
+      'restart': 'systemctl reboot',
+      'shutdown': 'systemctl poweroff',
+      'sleep': 'systemctl suspend',
+      'lock': 'loginctl lock-session'
     };
+    
+    // Check desktop environment and adjust lock command if needed
+    if (action === 'lock') {
+      const desktopEnv = process.env.XDG_CURRENT_DESKTOP || '';
+      if (desktopEnv.toLowerCase().includes('gnome')) {
+        commands.lock = 'gnome-screensaver-command -l';
+      } else if (desktopEnv.toLowerCase().includes('kde')) {
+        commands.lock = 'qdbus org.kde.screensaver /ScreenSaver Lock';
+      } else if (desktopEnv.toLowerCase().includes('xfce')) {
+        commands.lock = 'xflock4';
+      }
+    }
     
     // Check if the command is supported
     if (commands[action]) {
@@ -311,10 +382,10 @@ function executePowerCommand(action) {
           logToFile(`Command error: ${stderr}`, 'DEBUG');
           
           // Try to diagnose permission issues
-          isAdmin().then(adminStatus => {
-            logToFile(`Admin rights check: ${adminStatus ? 'Running as admin' : 'NOT running as admin'}`, 'INFO');
-            if (!adminStatus) {
-              logToFile('Power commands may require administrative privileges. Check your agent installation.', 'WARN');
+          isRoot().then(rootStatus => {
+            logToFile(`Root rights check: ${rootStatus ? 'Running as root' : 'NOT running as root'}`, 'INFO');
+            if (!rootStatus) {
+              logToFile('Power commands may require root privileges. Check your agent installation.', 'WARN');
             }
           });
           return;
@@ -354,10 +425,7 @@ function makeApiRequest(endpoint, method, data = null) {
         logToFile(`Request payload: ${JSON.stringify(data)}`, 'DEBUG');
       }
 
-      // Determine whether to use http or https based on the URL protocol
-      const requestModule = apiUrl.protocol === 'https:' ? https : http;
-
-      const req = requestModule.request(apiUrl, options, (res) => {
+      const req = https.request(apiUrl, options, (res) => {
         let responseBody = '';
         
         res.on('data', (chunk) => {
@@ -409,7 +477,7 @@ async function testApiConnection() {
   try {
     logToFile('Testing API connection...');
     
-    // Probeer eerst de config endpoint - GET in plaats van POST
+    // Try config endpoint first - GET instead of POST
     try {
       const configResult = await makeApiRequest('/devices/config', 'GET');
       logToFile('API config connection successful (HTTP 200)');
@@ -418,7 +486,7 @@ async function testApiConnection() {
       logToFile(`API config test failed: ${configError.message}, trying status endpoint...`, 'WARN');
     }
     
-    // Probeer dan de status endpoint
+    // Then try status endpoint
     try {
       const statusResult = await makeApiRequest('/devices/status', 'GET');
       logToFile('API status connection successful (HTTP 200)');
@@ -427,7 +495,7 @@ async function testApiConnection() {
       logToFile(`API status test failed: ${statusError.message}, trying check-in...`, 'WARN');
     }
     
-    // Als laatste proberen we de check-in endpoint met minimale data
+    // Finally try check-in endpoint with minimal data
     const testPayload = {
       token: config.api_token,
       uuid: config.device_uuid,
@@ -454,7 +522,7 @@ async function testApiConnection() {
       logToFile(`Running network diagnostics for ${host}...`);
       
       // Try to ping the domain
-      exec(`ping -n 3 ${host}`, (error, stdout, stderr) => {
+      exec(`ping -c 3 ${host}`, (error, stdout, stderr) => {
         if (error) {
           logToFile(`Ping test failed: ${error.message}`, 'DEBUG');
         } else {
@@ -510,15 +578,32 @@ function restartSshServer() {
     
     logToFile(`Starting SSH server on port ${config.ssh_port}`, 'INFO');
     
-    // Use Windows built-in SSH server or third-party implementation
-    // This is a placeholder for the actual implementation
-    exec(`net stop sshd && net start sshd`, (error, stdout, stderr) => {
-      if (error) {
-        logToFile(`Failed to restart SSH server: ${error.message}`, 'ERROR');
-        return;
+    // Use Linux SSH server (OpenSSH)
+    if (isRoot()) {
+      // Try to modify the SSH config if running as root
+      try {
+        const sshConfig = fs.readFileSync('/etc/ssh/sshd_config', 'utf8');
+        const updatedConfig = sshConfig.replace(/^#?Port\s+\d+$/m, `Port ${config.ssh_port}`);
+        
+        if (sshConfig !== updatedConfig) {
+          fs.writeFileSync('/etc/ssh/sshd_config', updatedConfig);
+          logToFile('SSH config updated with new port', 'INFO');
+        }
+        
+        // Restart the SSH service
+        exec('systemctl restart sshd', (error, stdout, stderr) => {
+          if (error) {
+            logToFile(`Failed to restart SSH server: ${error.message}`, 'ERROR');
+            return;
+          }
+          logToFile('SSH server restarted successfully', 'INFO');
+        });
+      } catch (e) {
+        logToFile(`Error updating SSH config: ${e.message}`, 'ERROR');
       }
-      logToFile('SSH server restarted successfully', 'INFO');
-    });
+    } else {
+      logToFile('Not running as root, cannot modify SSH server configuration', 'WARN');
+    }
   } catch (error) {
     logToFile(`Error restarting SSH server: ${error.message}`, 'ERROR');
   }
@@ -529,42 +614,33 @@ async function checkScheduledActions() {
   try {
     logToFile('Checking for scheduled power actions', 'DEBUG');
     
-    try {
-      const response = await makeApiRequest('/devices/scheduled-actions', 'GET');
+    const response = await makeApiRequest('/devices/scheduled-actions', 'GET');
+    
+    if (response && response.body && response.body.actions && response.body.actions.length > 0) {
+      const actions = response.body.actions;
+      logToFile(`Received ${actions.length} scheduled actions from server`, 'INFO');
       
-      if (response && response.body && response.body.actions && response.body.actions.length > 0) {
-        const actions = response.body.actions;
-        logToFile(`Received ${actions.length} scheduled actions from server`, 'INFO');
-        
-        // Check for any actions that need to be executed now
-        for (const action of actions) {
-          if (action.execute_now) {
-            logToFile(`Executing scheduled power action: ${action.action_type}`, 'INFO');
-            executePowerCommand(action.action_type);
-            
-            // Notify server that action was executed
-            try {
-              await makeApiRequest('/devices/scheduled-actions/executed', 'POST', {
-                action_id: action.id,
-                executed_at: new Date().toISOString(),
-                status: 'completed'
-              });
-            } catch (error) {
-              logToFile(`Failed to notify server about action execution: ${error.message}`, 'ERROR');
-            }
+      // Check for any actions that need to be executed now
+      for (const action of actions) {
+        if (action.execute_now) {
+          logToFile(`Executing scheduled power action: ${action.action_type}`, 'INFO');
+          executePowerCommand(action.action_type);
+          
+          // Notify server that action was executed
+          try {
+            await makeApiRequest('/devices/scheduled-actions/executed', 'POST', {
+              action_id: action.id,
+              executed_at: new Date().toISOString(),
+              status: 'completed'
+            });
+          } catch (error) {
+            logToFile(`Failed to notify server about action execution: ${error.message}`, 'ERROR');
           }
         }
       }
-    } catch (error) {
-      // 404 errors kunnen optreden als de endpoint niet bestaat - deze stil negeren op ontwikkelomgevingen
-      if (error.statusCode === 404) {
-        logToFile('Scheduled actions endpoint niet gevonden, mogelijk niet beschikbaar op ontwikkelomgeving', 'DEBUG');
-      } else {
-        logToFile(`Error checking scheduled actions: ${error.message}`, 'ERROR');
-      }
     }
   } catch (error) {
-    logToFile(`Error in checkScheduledActions: ${error.message}`, 'ERROR');
+    logToFile(`Error checking scheduled actions: ${error.message}`, 'ERROR');
   }
 }
 
@@ -578,10 +654,10 @@ async function getDetailedSystemInfo() {
       si.networkInterfaces()
     ]);
     
-    // Calculate disk usage (system drive)
-    let systemDrive = diskInfo.find(d => d.mount === 'C:' || d.mount === '/');
-    if (!systemDrive && diskInfo.length > 0) {
-      systemDrive = diskInfo[0];
+    // Calculate disk usage (root filesystem)
+    let rootFs = diskInfo.find(d => d.mount === '/');
+    if (!rootFs && diskInfo.length > 0) {
+      rootFs = diskInfo[0];
     }
     
     // Find primary network adapter
@@ -595,7 +671,7 @@ async function getDetailedSystemInfo() {
     return {
       cpu: cpuInfo,
       memory: memInfo,
-      disk: systemDrive,
+      disk: rootFs,
       network: primaryAdapter
     };
   } catch (error) {
@@ -634,11 +710,11 @@ async function getBasicMetrics() {
       memUsage = 50.0; // Safe fallback value
     }
     
-    // Calculate disk usage (system drive) - ensure it's a NUMBER type, not string
+    // Calculate disk usage (root filesystem) - ensure it's a NUMBER type, not string
     let diskUsage = 0;
-    const systemDrive = disk.find(d => d.mount === 'C:' || d.mount === '/');
-    if (systemDrive) {
-      diskUsage = parseFloat(systemDrive.use.toFixed(2));
+    const rootFs = disk.find(d => d.mount === '/');
+    if (rootFs) {
+      diskUsage = parseFloat(rootFs.use.toFixed(2));
     } else if (disk.length > 0) {
       diskUsage = parseFloat(disk[0].use.toFixed(2));
     }
@@ -678,7 +754,7 @@ async function checkForUpdates() {
       uuid: config.device_uuid,
       device_uuid: config.device_uuid,
       current_version: AGENT_VERSION,
-      os_type: 'windows'
+      os_type: 'linux'
     };
     
     const response = await makeApiRequest('/devices/check-for-updates', 'POST', data);
@@ -753,25 +829,44 @@ async function createFullPayload() {
     // Get OS version with validation
     let osVersion = os.release();
     if (!osVersion || osVersion.length === 0) {
-      osVersion = "10.0";
+      osVersion = "unknown";
       logToFile("Could not determine OS version, using fallback", "WARN");
     }
     
-    // Get a list of running services (Windows only)
-    let services = [];
-    if (process.platform === 'win32') {
-      try {
-        const serviceData = await si.services('*');
-        services = serviceData.slice(0, 10).map(service => ({
-          name: service.name || service.display_name || "Unknown Service",
-          status: service.running ? 'running' : 'stopped'
-        }));
-      } catch (e) {
-        logToFile(`Error getting services: ${e.message}`, 'DEBUG');
+    // Get distribution info if available
+    let distroInfo = "Linux";
+    try {
+      if (fs.existsSync('/etc/os-release')) {
+        const osReleaseContent = fs.readFileSync('/etc/os-release', 'utf8');
+        const prettyNameMatch = osReleaseContent.match(/PRETTY_NAME="([^"]+)"/);
+        if (prettyNameMatch && prettyNameMatch[1]) {
+          distroInfo = prettyNameMatch[1];
+        }
       }
+    } catch (e) {
+      logToFile(`Error getting distro info: ${e.message}`, 'DEBUG');
     }
     
-    // Payload met metrics op toplevel in plaats van genest
+    // Get a list of running services (systemd)
+    let services = [];
+    try {
+      exec('systemctl list-units --type=service --state=running --no-legend | head -10', (error, stdout) => {
+        if (!error && stdout) {
+          services = stdout.split('\n')
+            .filter(line => line.trim().length > 0)
+            .map(line => {
+              const parts = line.trim().split(/\s+/);
+              return {
+                name: parts[0] || "Unknown Service",
+                status: 'running'
+              };
+            });
+        }
+      });
+    } catch (e) {
+      logToFile(`Error getting services: ${e.message}`, 'DEBUG');
+    }
+    
     return {
       token: config.api_token,
       uuid: config.device_uuid,
@@ -779,17 +874,12 @@ async function createFullPayload() {
       hostname: hostname,
       ip_address: ipAddress,
       mac_address: macAddress,
-      os_type: 'windows',
-      os_version: osVersion,
+      os_type: 'linux',
+      os_version: `${distroInfo} ${osVersion}`,
       system_specs: systemSpecs,
-      cpu_usage: metrics.cpu_usage,
-      memory_usage: metrics.memory_usage,
-      disk_usage: metrics.disk_usage,
-      uptime_seconds: metrics.uptime,
+      metrics: metrics,
       services: services,
-      network_stats: [],
-      process_stats: [],
-      additional_metrics: {}
+      full_check_in: true
     };
   } catch (error) {
     logToFile(`Error creating full payload: ${error.message}`, 'ERROR');
@@ -803,12 +893,10 @@ async function createFullPayload() {
       hostname: os.hostname() || "unknown-host",
       ip_address: "127.0.0.1",
       mac_address: "AA:BB:CC:DD:EE:FF",
-      os_type: "windows",
-      os_version: "10.0",
-      cpu_usage: metrics.cpu_usage,
-      memory_usage: metrics.memory_usage,
-      disk_usage: metrics.disk_usage,
-      uptime_seconds: metrics.uptime
+      os_type: "linux",
+      os_version: "unknown",
+      metrics: metrics,
+      full_check_in: true
     };
   }
 }
@@ -820,11 +908,7 @@ async function createMetricsPayload() {
     token: config.api_token,
     uuid: config.device_uuid,
     device_uuid: config.device_uuid,
-    hostname: os.hostname() || "unknown-host",
-    cpu_usage: metrics.cpu_usage,
-    memory_usage: metrics.memory_usage,
-    disk_usage: metrics.disk_usage,
-    uptime_seconds: metrics.uptime
+    metrics: metrics
   };
 }
 
@@ -1104,46 +1188,6 @@ ipcMain.on('send-metrics-now', (event) => {
     });
 });
 
-// Update API URL from UI
-ipcMain.on('update-api-url', async (event, apiUrl) => {
-  try {
-    // Validate URL format
-    try {
-      new URL(apiUrl);
-    } catch (e) {
-      event.reply('settings-error', 'Invalid URL format. Please enter a valid URL.');
-      return;
-    }
-    
-    logToFile(`Updating API URL to: ${apiUrl}`);
-    
-    // Update config
-    config.api_base_url = apiUrl;
-    
-    // Save config to file
-    if (saveConfig()) {
-      // Test connection with new URL
-      const connectionSuccess = await testApiConnection();
-      
-      if (connectionSuccess) {
-        logToFile('API connection test successful with new URL');
-        event.reply('settings-saved');
-      } else {
-        logToFile('API connection test failed with new URL, but saved anyway', 'WARN');
-        event.reply('settings-error', 'Kon geen verbinding maken met de nieuwe URL. De instelling is wel opgeslagen, maar check of de server juist is geconfigureerd.');
-      }
-      
-      // Restart metrics collection with new configuration
-      startMetricsCollection();
-    } else {
-      event.reply('settings-error', 'Failed to save configuration file');
-    }
-  } catch (error) {
-    logToFile(`Error updating API URL: ${error.message}`, 'ERROR');
-    event.reply('settings-error', `Error: ${error.message}`);
-  }
-});
-
 // Check for startup argument
 const isStartup = process.argv.includes('--startup');
 
@@ -1152,10 +1196,10 @@ app.on('ready', async () => {
   ensureDirectories();
   loadConfig();
   
-  // Check if admin
-  const adminStatus = await isAdmin();
-  if (!adminStatus) {
-    logToFile('Application is not running with administrator privileges. Some features may not work correctly.', 'WARN');
+  // Check if root
+  const rootStatus = isRoot();
+  if (!rootStatus) {
+    logToFile('Application is not running with root privileges. Some features may not work correctly.', 'WARN');
   }
   
   createWindow();

@@ -757,12 +757,12 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/bin/bash $INSTALL_DIR/pulseguard-agent
+ExecStart=/usr/bin/env bash $INSTALL_DIR/pulseguard-agent
 WorkingDirectory=$INSTALL_DIR
 Restart=always
 RestartSec=10
-StandardOutput=journal
-StandardError=journal
+StandardOutput=append:/var/log/pulseguard-agent.log
+StandardError=append:/var/log/pulseguard-agent.log
 SyslogIdentifier=pulseguard-agent
 User=root
 # Pass necessary original parameters as environment variables to the script
@@ -773,6 +773,11 @@ Environment="PULSEGUARD_API_TOKEN=$API_TOKEN"
 [Install]
 WantedBy=multi-user.target
 EOL
+
+# Create log file with proper permissions
+touch /var/log/pulseguard-agent.log
+chmod 644 /var/log/pulseguard-agent.log
+chown root:root /var/log/pulseguard-agent.log
 
 # Reload systemd, enable and start service
 echo -e "\\e[33mEnabling and starting service...\\e[0m"

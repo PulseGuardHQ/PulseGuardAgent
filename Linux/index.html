@@ -5,7 +5,7 @@
   <title>PulseGuard Agent</title>
   <style>
     body {
-      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      font-family: 'Ubuntu', 'Droid Sans', sans-serif;
       margin: 0;
       padding: 20px;
       background-color: #f5f5f5;
@@ -184,7 +184,7 @@
   <div class="container">
     <header>
       <img src="assets/logo.png" alt="PulseGuard Logo" id="logo">
-      <h1>PulseGuard Agent</h1>
+      <h1>PulseGuard Agent for Linux</h1>
     </header>
     
     <!-- Configuration screen shown when not configured -->
@@ -256,46 +256,45 @@
           
           <div class="metric-item">
             <span class="metric-name">Uptime</span>
-            <span class="metric-value" id="metric-uptime">0s</span>
+            <span class="metric-value" id="metric-uptime">0 minutes</span>
           </div>
         </div>
       </div>
       
       <!-- Settings Tab -->
       <div class="tab-content" id="settings-tab">
+        <h3>Agent Settings</h3>
+        <p>These settings are managed through your PulseGuard dashboard.</p>
+        
         <div class="form-group">
-          <label for="api-url">API URL:</label>
-          <input type="text" id="api-url">
-          <small class="form-text">Bijvoorbeeld: http://127.0.0.1:8000 of het adres van uw PulseGuard server</small>
+          <label>API Base URL:</label>
+          <input type="text" id="settings-api-url" disabled>
         </div>
         
         <div class="form-group">
-          <label for="settings-device-uuid">Device UUID:</label>
-          <input type="text" id="settings-device-uuid" readonly>
+          <label>Check Interval (seconds):</label>
+          <input type="number" id="settings-check-interval" disabled>
         </div>
         
         <div class="form-group">
-          <label for="settings-check-interval">Check Interval (seconds):</label>
-          <input type="text" id="settings-check-interval" readonly>
+          <label>SSH Access:</label>
+          <div>
+            <input type="checkbox" id="settings-ssh-enabled" disabled>
+            <label for="settings-ssh-enabled">Enable SSH access</label>
+          </div>
         </div>
-        
-        <button id="save-settings-button">Instellingen Opslaan</button>
-        <button id="reconfigure-button">Opnieuw Configureren</button>
-        
-        <div class="error-message" id="settings-error"></div>
-        <div class="success-message" id="settings-success">Instellingen opgeslagen!</div>
       </div>
     </div>
     
     <div class="version-info">
-      PulseGuard Agent v<span id="version">1.0.0</span>
+      PulseGuard Agent v<span id="version-number">1.0.0</span>
     </div>
   </div>
   
   <script>
     const { ipcRenderer } = require('electron');
     
-    // DOM Elements - Setup
+    // DOM Elements
     const setupScreen = document.getElementById('setup-screen');
     const dashboardScreen = document.getElementById('dashboard-screen');
     const deviceUuidInput = document.getElementById('device-uuid');
@@ -303,157 +302,96 @@
     const saveConfigButton = document.getElementById('save-config-button');
     const configError = document.getElementById('config-error');
     const configSuccess = document.getElementById('config-success');
-    const versionSpan = document.getElementById('version');
-    
-    // DOM Elements - Dashboard
     const statusDeviceUuid = document.getElementById('status-device-uuid');
     const statusCheckInterval = document.getElementById('status-check-interval');
     const statusLastCheckin = document.getElementById('status-last-checkin');
-    const sendNowButton = document.getElementById('send-now-button');
     const metricCpu = document.getElementById('metric-cpu');
     const metricMemory = document.getElementById('metric-memory');
     const metricDisk = document.getElementById('metric-disk');
     const metricUptime = document.getElementById('metric-uptime');
-    const apiUrlInput = document.getElementById('api-url');
-    const settingsDeviceUuid = document.getElementById('settings-device-uuid');
+    const settingsApiUrl = document.getElementById('settings-api-url');
     const settingsCheckInterval = document.getElementById('settings-check-interval');
-    const reconfigureButton = document.getElementById('reconfigure-button');
-    const saveSettingsButton = document.getElementById('save-settings-button');
-    const settingsError = document.getElementById('settings-error');
-    const settingsSuccess = document.getElementById('settings-success');
-    
-    // Tab Navigation
+    const settingsSshEnabled = document.getElementById('settings-ssh-enabled');
+    const versionNumber = document.getElementById('version-number');
+    const sendNowButton = document.getElementById('send-now-button');
     const tabs = document.querySelectorAll('.tab');
     const tabContents = document.querySelectorAll('.tab-content');
     
-    // Event listeners
+    // Initialize
+    document.addEventListener('DOMContentLoaded', () => {
+      // Request status from main process
+      ipcRenderer.send('get-status');
+      
+      // Set up tab switching
+      tabs.forEach(tab => {
+        tab.addEventListener('click', () => {
+          const tabId = tab.getAttribute('data-tab');
+          
+          // Update active tab
+          tabs.forEach(t => t.classList.remove('active'));
+          tab.classList.add('active');
+          
+          // Show active content
+          tabContents.forEach(content => {
+            content.classList.remove('active');
+            if (content.id === `${tabId}-tab`) {
+              content.classList.add('active');
+            }
+          });
+        });
+      });
+    });
+    
+    // Handle save config button
     saveConfigButton.addEventListener('click', () => {
       const deviceUUID = deviceUuidInput.value.trim();
       const apiToken = apiTokenInput.value.trim();
       
-      if (!deviceUUID || !apiToken) {
-        showConfigError('Device UUID and API Token are required');
-        return;
-      }
-      
-      // Disable button while processing
-      saveConfigButton.disabled = true;
-      saveConfigButton.textContent = 'Saving...';
-      
-      // Clear previous messages
+      // Hide previous messages
       configError.style.display = 'none';
       configSuccess.style.display = 'none';
       
-      // Send configuration to main process
-      ipcRenderer.send('save-config', { deviceUUID, apiToken });
-    });
-    
-    sendNowButton.addEventListener('click', () => {
-      sendNowButton.disabled = true;
-      sendNowButton.textContent = 'Sending...';
-      
-      ipcRenderer.send('send-metrics-now');
-    });
-    
-    reconfigureButton.addEventListener('click', () => {
-      // Show setup screen again
-      setupScreen.style.display = 'block';
-      dashboardScreen.style.display = 'none';
-    });
-    
-    saveSettingsButton.addEventListener('click', () => {
-      const apiUrl = apiUrlInput.value.trim();
-      
-      if (!apiUrl) {
-        showSettingsError('API URL is required');
+      // Validate inputs
+      if (!deviceUUID || !apiToken) {
+        configError.textContent = 'Please enter both Device UUID and API Token';
+        configError.style.display = 'block';
         return;
       }
       
-      // Disable button while processing
-      saveSettingsButton.disabled = true;
-      saveSettingsButton.textContent = 'Opslaan...';
+      // Send to main process
+      ipcRenderer.send('save-config', { deviceUUID, apiToken });
       
-      // Clear previous messages
-      settingsError.style.display = 'none';
-      settingsSuccess.style.display = 'none';
-      
-      // Send API URL update to main process
-      ipcRenderer.send('update-api-url', apiUrl);
+      // Disable button during save
+      saveConfigButton.disabled = true;
+      saveConfigButton.textContent = 'Saving...';
     });
     
-    // Tab click handlers
-    tabs.forEach(tab => {
-      tab.addEventListener('click', () => {
-        // Remove active class from all tabs and contents
-        tabs.forEach(t => t.classList.remove('active'));
-        tabContents.forEach(c => c.classList.remove('active'));
-        
-        // Add active class to clicked tab and corresponding content
-        tab.classList.add('active');
-        const tabId = tab.getAttribute('data-tab');
-        document.getElementById(`${tabId}-tab`).classList.add('active');
-      });
+    // Handle send metrics now button
+    sendNowButton.addEventListener('click', () => {
+      sendNowButton.disabled = true;
+      sendNowButton.textContent = 'Sending...';
+      ipcRenderer.send('send-metrics-now');
     });
     
-    // IPC Event handlers
-    ipcRenderer.on('config-saved', () => {
-      configSuccess.style.display = 'block';
-      configError.style.display = 'none';
-      
-      // Re-enable button
-      saveConfigButton.disabled = false;
-      saveConfigButton.textContent = 'Save Configuration';
-      
-      // Wait for connection status before transitioning
-    });
+    // IPC Event Handlers
     
-    ipcRenderer.on('connection-status', (event, status) => {
-      if (status.success) {
-        configSuccess.textContent = 'Configuration saved successfully! Connection to PulseGuard API established.';
-      } else {
-        configSuccess.textContent = 'Configuration saved! ' + status.message;
-      }
-      
-      configSuccess.style.display = 'block';
-      
-      // Switch to dashboard view after a delay
-      setTimeout(() => {
-        setupScreen.style.display = 'none';
-        dashboardScreen.style.display = 'block';
-        
-        // Get current status
-        ipcRenderer.send('get-status');
-      }, 2000);
-    });
-    
-    ipcRenderer.on('config-error', (event, message) => {
-      showConfigError(message);
-      
-      // Re-enable button
-      saveConfigButton.disabled = false;
-      saveConfigButton.textContent = 'Save Configuration';
-    });
-    
-    ipcRenderer.on('status-update', (event, status) => {
-      // Update UI with status information
-      versionSpan.textContent = status.version;
-      
-      if (status.configured) {
+    // Handle status update from main process
+    ipcRenderer.on('status-update', (event, data) => {
+      if (data.configured) {
         // Show dashboard if configured
         setupScreen.style.display = 'none';
         dashboardScreen.style.display = 'block';
         
-        // Update status fields
-        statusDeviceUuid.textContent = status.deviceUUID;
-        statusCheckInterval.textContent = status.checkInterval;
+        // Update status information
+        statusDeviceUuid.textContent = data.deviceUUID;
+        statusCheckInterval.textContent = data.checkInterval;
         
-        // Update settings fields
-        apiUrlInput.value = status.apiBaseUrl;
-        settingsDeviceUuid.value = status.deviceUUID;
-        settingsCheckInterval.value = status.checkInterval;
+        // Update settings
+        settingsApiUrl.value = data.apiBaseUrl;
+        settingsCheckInterval.value = data.checkInterval;
         
-        // Pre-fill setup form in case user wants to reconfigure
-        deviceUuidInput.value = status.deviceUUID;
+        // Update version
+        versionNumber.textContent = data.version;
       } else {
         // Show setup screen if not configured
         setupScreen.style.display = 'block';
@@ -461,90 +399,79 @@
       }
     });
     
-    ipcRenderer.on('metrics-sent', (event, metrics) => {
-      // Update metrics display
-      metricCpu.textContent = metrics.cpu_usage + '%';
-      metricMemory.textContent = metrics.memory_usage + '%';
-      metricDisk.textContent = metrics.disk_usage + '%';
+    // Handle config save response
+    ipcRenderer.on('config-saved', () => {
+      saveConfigButton.disabled = false;
+      saveConfigButton.textContent = 'Save Configuration';
+      configSuccess.style.display = 'block';
       
-      // Format uptime nicely
-      const uptime = formatUptime(metrics.uptime);
-      metricUptime.textContent = uptime;
-      
-      // Update last check-in time
-      statusLastCheckin.textContent = new Date().toLocaleString();
+      // Request updated status
+      setTimeout(() => {
+        ipcRenderer.send('get-status');
+      }, 1000);
     });
     
-    ipcRenderer.on('metrics-sent-response', (event, response) => {
+    // Handle config error
+    ipcRenderer.on('config-error', (event, message) => {
+      saveConfigButton.disabled = false;
+      saveConfigButton.textContent = 'Save Configuration';
+      configError.textContent = message;
+      configError.style.display = 'block';
+    });
+    
+    // Handle metrics update
+    ipcRenderer.on('metrics-sent', (event, metrics) => {
+      metricCpu.textContent = `${metrics.cpu_usage.toFixed(1)}%`;
+      metricMemory.textContent = `${metrics.memory_usage.toFixed(1)}%`;
+      metricDisk.textContent = `${metrics.disk_usage.toFixed(1)}%`;
+      
+      // Format uptime
+      const uptime = metrics.uptime;
+      let uptimeText = '';
+      
+      if (uptime < 60) {
+        uptimeText = `${uptime} seconds`;
+      } else if (uptime < 3600) {
+        uptimeText = `${Math.floor(uptime / 60)} minutes`;
+      } else if (uptime < 86400) {
+        uptimeText = `${Math.floor(uptime / 3600)} hours, ${Math.floor((uptime % 3600) / 60)} minutes`;
+      } else {
+        uptimeText = `${Math.floor(uptime / 86400)} days, ${Math.floor((uptime % 86400) / 3600)} hours`;
+      }
+      
+      metricUptime.textContent = uptimeText;
+      statusLastCheckin.textContent = new Date().toLocaleTimeString();
+      
+      // Re-enable send button
+      sendNowButton.disabled = false;
+      sendNowButton.textContent = 'Send Metrics Now';
+    });
+    
+    // Handle metrics sent response
+    ipcRenderer.on('metrics-sent-response', (event, data) => {
       sendNowButton.disabled = false;
       sendNowButton.textContent = 'Send Metrics Now';
       
-      if (!response.success) {
-        alert('Error sending metrics: ' + response.error);
+      if (!data.success) {
+        alert(`Failed to send metrics: ${data.error}`);
       }
     });
     
-    ipcRenderer.on('update-available', (event, updateInfo) => {
-      const updateMessage = `A new version of PulseGuard Agent is available: ${updateInfo.newVersion}`;
-      alert(updateMessage);
-    });
-    
-    ipcRenderer.on('settings-saved', () => {
-      settingsSuccess.style.display = 'block';
-      settingsError.style.display = 'none';
-      
-      // Re-enable button
-      saveSettingsButton.disabled = false;
-      saveSettingsButton.textContent = 'Instellingen Opslaan';
-      
-      // Get current status
-      ipcRenderer.send('get-status');
-    });
-    
-    ipcRenderer.on('settings-error', (event, message) => {
-      showSettingsError(message);
-      
-      // Re-enable button
-      saveSettingsButton.disabled = false;
-      saveSettingsButton.textContent = 'Instellingen Opslaan';
-    });
-    
-    // Helper functions
-    function showConfigError(message) {
-      configError.textContent = message;
-      configError.style.display = 'block';
-      configSuccess.style.display = 'none';
-    }
-    
-    function showSettingsError(message) {
-      settingsError.textContent = message;
-      settingsError.style.display = 'block';
-      settingsSuccess.style.display = 'none';
-    }
-    
-    function formatUptime(seconds) {
-      if (seconds < 60) {
-        return seconds + 's';
-      } else if (seconds < 3600) {
-        return Math.floor(seconds / 60) + 'm ' + (seconds % 60) + 's';
-      } else if (seconds < 86400) {
-        const hours = Math.floor(seconds / 3600);
-        const minutes = Math.floor((seconds % 3600) / 60);
-        return hours + 'h ' + minutes + 'm';
+    // Handle connection status update
+    ipcRenderer.on('connection-status', (event, data) => {
+      if (data.success) {
+        configSuccess.textContent = data.message;
+        configSuccess.style.display = 'block';
       } else {
-        const days = Math.floor(seconds / 86400);
-        const hours = Math.floor((seconds % 86400) / 3600);
-        return days + 'd ' + hours + 'h';
+        configError.textContent = data.message;
+        configError.style.display = 'block';
       }
-    }
+    });
     
-    // Initialize the app
-    ipcRenderer.send('get-status');
-    
-    // Placeholder for logo if not found
-    document.getElementById('logo').onerror = function() {
-      this.src = 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyMDAiIGhlaWdodD0iNTAiPjxyZWN0IHdpZHRoPSIyMDAiIGhlaWdodD0iNTAiIGZpbGw9IiMyYTU4ODUiLz48dGV4dCB4PSIyMCIgeT0iMzAiIGZvbnQtZmFtaWx5PSJBcmlhbCIgZm9udC1zaXplPSIxNiIgZmlsbD0id2hpdGUiPlB1bHNlR3VhcmQ8L3RleHQ+PC9zdmc+';
-    };
+    // Handle update available notification
+    ipcRenderer.on('update-available', (event, data) => {
+      alert(`A new version of PulseGuard Agent is available!\nCurrent: ${data.currentVersion}\nNew: ${data.newVersion}\n\nPlease update through your package manager.`);
+    });
   </script>
 </body>
 </html> 
