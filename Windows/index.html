@@ -98,6 +98,34 @@
       display: none;
     }
     
+    .button-group {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      margin-top: 20px;
+    }
+    
+    .secondary-button {
+      background-color: #6c757d;
+      color: white;
+      border: none;
+      padding: 12px 20px;
+      border-radius: 4px;
+      font-size: 16px;
+      cursor: pointer;
+      transition: background-color 0.3s;
+    }
+    
+    .secondary-button:hover {
+      background-color: #5a6268;
+    }
+    
+    .notification-area {
+      margin-top: 20px;
+      padding: 10px;
+      border-radius: 4px;
+    }
+    
     .status-container {
       margin-top: 20px;
       padding: 15px;
@@ -172,6 +200,28 @@
       display: block;
     }
     
+    .hidden {
+      display: none;
+    }
+    
+    #update-notification.success {
+      background-color: #d4edda;
+      color: #155724;
+      border: 1px solid #c3e6cb;
+    }
+    
+    #update-notification.error {
+      background-color: #f8d7da;
+      color: #721c24;
+      border: 1px solid #f5c6cb;
+    }
+    
+    #update-notification.info {
+      background-color: #d1ecf1;
+      color: #0c5460;
+      border: 1px solid #bee5eb;
+    }
+
     .version-info {
       font-size: 12px;
       color: #777;
@@ -204,10 +254,15 @@
         <small class="form-text">The API token is used to authenticate your device with the PulseGuard servers.</small>
       </div>
       
-      <button id="save-config-button">Save Configuration</button>
+      <div class="button-group">
+        <button id="save-config-button">Save Configuration</button>
+        <button id="back-from-setup-button" class="secondary-button">Back to Dashboard</button>
+      </div>
       
-      <div class="error-message" id="config-error"></div>
-      <div class="success-message" id="config-success">Configuration saved successfully!</div>
+      <div class="notification-area">
+        <div class="error-message" id="config-error"></div>
+        <div class="success-message" id="config-success">Configuration saved successfully!</div>
+      </div>
     </div>
     
     <!-- Dashboard screen shown when configured -->
@@ -231,6 +286,18 @@
           <p>Last Check-in: <span id="status-last-checkin">Never</span></p>
           
           <button id="send-now-button">Send Metrics Now</button>
+        </div>
+        
+        <div class="status-container">
+          <h3>Update Status</h3>
+          <p>Current Version: <span id="current-version">1.0.0</span></p>
+          <p id="update-status">Checking for updates...</p>
+          
+          <div class="button-group">
+            <button id="check-updates-button" class="secondary-button">Check for Updates</button>
+          </div>
+          
+          <div id="update-notification" class="notification-area hidden"></div>
         </div>
       </div>
       
@@ -263,6 +330,8 @@
       
       <!-- Settings Tab -->
       <div class="tab-content" id="settings-tab">
+        <h3>Agent Configuration</h3>
+        
         <div class="form-group">
           <label for="api-url">API URL:</label>
           <input type="text" id="api-url">
@@ -272,18 +341,24 @@
         <div class="form-group">
           <label for="settings-device-uuid">Device UUID:</label>
           <input type="text" id="settings-device-uuid" readonly>
+          <small class="form-text">Uniek apparaat ID (kan alleen worden gewijzigd bij opnieuw configureren)</small>
         </div>
         
         <div class="form-group">
           <label for="settings-check-interval">Check Interval (seconds):</label>
           <input type="text" id="settings-check-interval" readonly>
+          <small class="form-text">Interval voor het verzenden van systeemgegevens</small>
         </div>
         
-        <button id="save-settings-button">Instellingen Opslaan</button>
-        <button id="reconfigure-button">Opnieuw Configureren</button>
+        <div class="button-group">
+          <button id="save-settings-button" class="primary-button">Instellingen Opslaan</button>
+          <button id="reconfigure-button" class="secondary-button">Opnieuw Configureren</button>
+        </div>
         
-        <div class="error-message" id="settings-error"></div>
-        <div class="success-message" id="settings-success">Instellingen opgeslagen!</div>
+        <div class="notification-area">
+          <div class="error-message" id="settings-error"></div>
+          <div class="success-message" id="settings-success">Instellingen opgeslagen!</div>
+        </div>
       </div>
     </div>
     
@@ -301,6 +376,7 @@
     const deviceUuidInput = document.getElementById('device-uuid');
     const apiTokenInput = document.getElementById('api-token');
     const saveConfigButton = document.getElementById('save-config-button');
+    const backFromSetupButton = document.getElementById('back-from-setup-button');
     const configError = document.getElementById('config-error');
     const configSuccess = document.getElementById('config-success');
     const versionSpan = document.getElementById('version');
@@ -321,6 +397,12 @@
     const saveSettingsButton = document.getElementById('save-settings-button');
     const settingsError = document.getElementById('settings-error');
     const settingsSuccess = document.getElementById('settings-success');
+    
+    // DOM Elements - Update
+    const currentVersionSpan = document.getElementById('current-version');
+    const updateStatusP = document.getElementById('update-status');
+    const checkUpdatesButton = document.getElementById('check-updates-button');
+    const updateNotification = document.getElementById('update-notification');
     
     // Tab Navigation
     const tabs = document.querySelectorAll('.tab');
@@ -359,6 +441,15 @@
       // Show setup screen again
       setupScreen.style.display = 'block';
       dashboardScreen.style.display = 'none';
+      // Show back button since we're reconfiguring
+      backFromSetupButton.style.display = 'block';
+    });
+    
+    // Back button from setup screen
+    backFromSetupButton.addEventListener('click', () => {
+      // Return to dashboard
+      setupScreen.style.display = 'none';
+      dashboardScreen.style.display = 'block';
     });
     
     saveSettingsButton.addEventListener('click', () => {
@@ -381,6 +472,16 @@
       ipcRenderer.send('update-api-url', apiUrl);
     });
     
+    // Update check button handler
+    checkUpdatesButton.addEventListener('click', () => {
+      checkUpdatesButton.disabled = true;
+      checkUpdatesButton.textContent = 'Checking...';
+      updateStatusP.textContent = 'Checking for updates...';
+      hideUpdateNotification();
+      
+      ipcRenderer.send('check-for-updates');
+    });
+
     // Tab click handlers
     tabs.forEach(tab => {
       tab.addEventListener('click', () => {
@@ -437,11 +538,15 @@
     ipcRenderer.on('status-update', (event, status) => {
       // Update UI with status information
       versionSpan.textContent = status.version;
+      currentVersionSpan.textContent = status.version;
       
       if (status.configured) {
         // Show dashboard if configured
         setupScreen.style.display = 'none';
         dashboardScreen.style.display = 'block';
+        
+        // Hide back button when showing dashboard first time
+        backFromSetupButton.style.display = 'none';
         
         // Update status fields
         statusDeviceUuid.textContent = status.deviceUUID;
@@ -454,10 +559,13 @@
         
         // Pre-fill setup form in case user wants to reconfigure
         deviceUuidInput.value = status.deviceUUID;
+        apiTokenInput.value = ''; // Clear for security
       } else {
         // Show setup screen if not configured
         setupScreen.style.display = 'block';
         dashboardScreen.style.display = 'none';
+        // Hide back button on initial setup
+        backFromSetupButton.style.display = 'none';
       }
     });
     
@@ -487,6 +595,26 @@
     ipcRenderer.on('update-available', (event, updateInfo) => {
       const updateMessage = `A new version of PulseGuard Agent is available: ${updateInfo.newVersion}`;
       alert(updateMessage);
+    });
+    
+    // Update check result handler
+    ipcRenderer.on('update-check-result', (event, result) => {
+      checkUpdatesButton.disabled = false;
+      checkUpdatesButton.textContent = 'Check for Updates';
+      
+      if (result.error) {
+        updateStatusP.textContent = 'Error checking for updates';
+        showUpdateNotification(`Error: ${result.error}`, 'error');
+      } else if (result.updateAvailable) {
+        updateStatusP.textContent = `Update available: v${result.latestVersion}`;
+        showUpdateNotification(
+          `New version ${result.latestVersion} is available! <a href="#" onclick="openUpdateUrl('${result.downloadUrl}')">Download now</a>`, 
+          'success'
+        );
+      } else {
+        updateStatusP.textContent = 'You have the latest version';
+        showUpdateNotification('Your PulseGuard Agent is up to date!', 'info');
+      }
     });
     
     ipcRenderer.on('settings-saved', () => {
@@ -538,6 +666,22 @@
       }
     }
     
+    // Update notification helper functions
+    function showUpdateNotification(message, type = 'info') {
+      updateNotification.innerHTML = message;
+      updateNotification.className = `notification-area ${type}`;
+      updateNotification.classList.remove('hidden');
+    }
+    
+    function hideUpdateNotification() {
+      updateNotification.classList.add('hidden');
+    }
+    
+    // Global function for opening update URL (called from notification)
+    window.openUpdateUrl = function(url) {
+      require('electron').shell.openExternal(url);
+    }
+
     // Initialize the app
     ipcRenderer.send('get-status');
     
@@ -547,4 +691,4 @@
     };
   </script>
 </body>
-</html> 
+</html>

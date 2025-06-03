@@ -1,6 +1,6 @@
 {
   "name": "pulseguard-agent",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "PulseGuard Agent for Windows",
   "main": "main.js",
   "scripts": {

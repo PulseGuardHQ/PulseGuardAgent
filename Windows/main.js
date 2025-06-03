@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, Tray, Menu } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Tray, Menu, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const si = require('systeminformation');
@@ -24,6 +24,10 @@ let isQuitting = false;
 let metricsInterval = null;
 let updateCheckInterval = null;
 
+// Update checking state
+let lastUpdateCheck = 0;
+const UPDATE_CHECK_INTERVAL = 24 * 60 * 60 * 1000; // Check every 24 hours
+
 // Config and paths
 const installDir = process.env.PROGRAMDATA + '\\PulseGuard';
 const configFile = installDir + '\\config.json';
@@ -47,7 +51,9 @@ let config = {
   full_check_interval: 86400,
   metrics_enabled: true,
   ssh_enabled: false,
-  ssh_port: 22
+  ssh_port: 22,
+  auto_update_check: true, // Enable automatic update checking
+  update_check_interval: 24 // Check for updates every 24 hours
 };
 
 // Ensure directories exist
@@ -1144,6 +1150,21 @@ ipcMain.on('update-api-url', async (event, apiUrl) => {
   }
 });
 
+// Check for updates from UI
+ipcMain.on('check-for-updates', async (event) => {
+  try {
+    logToFile('Manual update check requested from UI');
+    const result = await checkForUpdates();
+    event.reply('update-check-result', result);
+  } catch (error) {
+    logToFile(`Manual update check failed: ${error.message}`, 'ERROR');
+    event.reply('update-check-result', { 
+      updateAvailable: false, 
+      error: error.message 
+    });
+  }
+});
+
 // Check for startup argument
 const isStartup = process.argv.includes('--startup');
 
@@ -1177,6 +1198,9 @@ app.on('ready', async () => {
   } else {
     logToFile('Application started but not fully configured yet - metrics collection disabled', 'WARN');
   }
+  
+  // Start update checker
+  startUpdateChecker();
 });
 
 // Handle window activation
@@ -1242,4 +1266,212 @@ function logApiResponse(response) {
   } catch (error) {
     logToFile(`Error logging API response: ${error.message}`, 'ERROR');
   }
-} 
+}
+
+// Check for updates from GitHub Releases
+async function checkGithubForUpdates() {
+  try {
+    logToFile('Checking GitHub for application updates...');
+    
+    const repoOwner = 'your-github-username';
+    const repoName = 'your-repo-name';
+    
+    // GitHub API URL for releases
+    const apiUrl = `https://api.github.com/repos/${repoOwner}/${repoName}/releases/latest`;
+    
+    const response = await makeApiRequest(apiUrl, 'GET');
+    
+    if (response && response.body && response.body.tag_name) {
+      const latestVersion = response.body.tag_name.replace('v', '');
+      logToFile(`Latest version on GitHub: ${latestVersion}`);
+      
+      // Compare with current version
+      if (latestVersion !== AGENT_VERSION) {
+        logToFile(`New version available! (${latestVersion})`);
+        
+        // Notify user about the update in the UI
+        if (mainWindow) {
+          mainWindow.webContents.send('update-available', {
+            currentVersion: AGENT_VERSION,
+            newVersion: latestVersion,
+            updateUrl: response.body.html_url,
+            updateNotes: response.body.body
+          });
+        }
+      } else {
+        logToFile('No new version available on GitHub');
+      }
+    } else {
+      logToFile('Invalid response from GitHub API', 'ERROR');
+    }
+  } catch (error) {
+    logToFile(`Error checking GitHub for updates: ${error.message}`, 'ERROR');
+  }
+}
+
+// Update checker functions
+function checkForUpdates() {
+  return new Promise((resolve, reject) => {
+    const githubApiUrl = 'https://api.github.com/repos/pulseguard-nl/PulseGuardAgent/releases/latest';
+    
+    logToFile('Checking for updates...');
+    
+    https.get(githubApiUrl, {
+      headers: {
+        'User-Agent': 'PulseGuard-Agent'
+      }
+    }, (res) => {
+      let data = '';
+      
+      res.on('data', (chunk) => {
+        data += chunk;
+      });
+      
+      res.on('end', () => {
+        try {
+          if (res.statusCode !== 200) {
+            logToFile(`GitHub API returned status ${res.statusCode}`, 'ERROR');
+            reject(new Error(`HTTP ${res.statusCode}`));
+            return;
+          }
+          
+          const release = JSON.parse(data);
+          const latestVersion = release.tag_name.replace(/^v/, ''); // Remove 'v' prefix if present
+          const currentVersion = AGENT_VERSION;
+          
+          logToFile(`Current version: ${currentVersion}, Latest version: ${latestVersion}`);
+          
+          if (isNewerVersion(latestVersion, currentVersion)) {
+            logToFile(`New version available: ${latestVersion}`);
+            
+            // Show notification in tray
+            if (tray) {
+              tray.displayBalloon({
+                iconType: 'info',
+                title: 'PulseGuard Update Available',
+                content: `Version ${latestVersion} is available. Click to download.`
+              });
+            }
+            
+            // Update tray menu to include update option
+            updateTrayMenuWithUpdate(release.html_url, latestVersion);
+            
+            resolve({
+              updateAvailable: true,
+              latestVersion: latestVersion,
+              downloadUrl: release.html_url,
+              releaseNotes: release.body
+            });
+          } else {
+            logToFile('Agent is up to date');
+            resolve({ updateAvailable: false });
+          }
+          
+        } catch (error) {
+          logToFile(`Error parsing GitHub API response: ${error.message}`, 'ERROR');
+          reject(error);
+        }
+      });
+    }).on('error', (error) => {
+      logToFile(`Error checking for updates: ${error.message}`, 'ERROR');
+      reject(error);
+    });
+  });
+}
+
+function isNewerVersion(latest, current) {
+  const latestParts = latest.split('.').map(Number);
+  const currentParts = current.split('.').map(Number);
+  
+  for (let i = 0; i < Math.max(latestParts.length, currentParts.length); i++) {
+    const latestPart = latestParts[i] || 0;
+    const currentPart = currentParts[i] || 0;
+    
+    if (latestPart > currentPart) return true;
+    if (latestPart < currentPart) return false;
+  }
+  
+  return false;
+}
+
+function updateTrayMenuWithUpdate(downloadUrl, version) {
+  if (!tray) return;
+  
+  const contextMenu = Menu.buildFromTemplate([
+    { 
+      label: `🔄 Update Available (v${version})`, 
+      click: () => { 
+        shell.openExternal(downloadUrl);
+      }
+    },
+    { type: 'separator' },
+    { label: 'Open PulseGuard', click: () => { if (mainWindow) mainWindow.show(); } },
+    { label: 'Send Metrics Now', click: () => { collectAndSendMetrics(true); } },
+    { type: 'separator' },
+    { 
+      label: 'Power Management',
+      submenu: [
+        { label: 'Lock Computer', click: () => { executePowerCommand('lock'); } },
+        { label: 'Sleep', click: () => { executePowerCommand('sleep'); } },
+        { label: 'Restart', click: () => { 
+          dialog.showMessageBox({
+            type: 'question',
+            buttons: ['Yes', 'No'],
+            title: 'Confirm Restart',
+            message: 'Are you sure you want to restart your computer?'
+          }).then(result => {
+            if (result.response === 0) {
+              executePowerCommand('restart');
+            }
+          });
+        }},
+        { label: 'Shutdown', click: () => {
+          dialog.showMessageBox({
+            type: 'question',
+            buttons: ['Yes', 'No'],
+            title: 'Confirm Shutdown',
+            message: 'Are you sure you want to shutdown your computer?'
+          }).then(result => {
+            if (result.response === 0) {
+              executePowerCommand('shutdown');
+            }
+          });
+        }}
+      ]
+    },
+    { type: 'separator' },
+    { label: 'Quit', click: () => { 
+      isQuitting = true;
+      app.quit();
+    }}
+  ]);
+  
+  tray.setContextMenu(contextMenu);
+}
+
+function startUpdateChecker() {
+  if (!config.auto_update_check) {
+    logToFile('Automatic update checking is disabled');
+    return;
+  }
+  
+  // Check immediately on startup
+  setTimeout(() => {
+    checkForUpdates().catch(error => {
+      logToFile(`Initial update check failed: ${error.message}`, 'ERROR');
+    });
+  }, 5000); // Wait 5 seconds after startup
+  
+  // Set up periodic checking
+  updateCheckInterval = setInterval(() => {
+    const now = Date.now();
+    if (now - lastUpdateCheck >= UPDATE_CHECK_INTERVAL) {
+      lastUpdateCheck = now;
+      checkForUpdates().catch(error => {
+        logToFile(`Periodic update check failed: ${error.message}`, 'ERROR');
+      });
+    }
+  }, 60 * 60 * 1000); // Check every hour, but only execute every 24 hours
+  
+  logToFile('Update checker started');
+}
