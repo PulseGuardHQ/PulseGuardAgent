@@ -1,91 +1,128 @@
-# PulseGuard Agent for Windows
+# PulseGuard Agent voor Windows
 
-This is the Windows agent application for PulseGuard monitoring services. It collects system metrics and sends them to the PulseGuard server.
+Een krachtige Windows agent voor het monitoren en beheren van systemen via de PulseGuard platform.
 
-## Features
+## Kenmerken
 
-- Monitors CPU, memory and disk usage
-- Runs in the background with system tray icon
-- Automatically starts with Windows
-- Adjustable check interval
-- Full system information collection
-- Power management capabilities (restart, shutdown, sleep, lock)
+- **Automatische System Monitoring**: Verzamelt real-time metrics van CPU, geheugen, schijf en netwerk
+- **Remote Management**: SSH, RDP en VNC ondersteuning voor externe toegang
+- **Power Management**: Vergrendelen, slaapstand, herstarten en afsluiten via de API
+- **Betrouwbare Auto-Start**: Meerdere methoden voor automatisch opstarten bij system boot
+- **Automatische Updates**: Controleert en installeert updates automatisch
+- **Robuuste Cleanup**: Verwijdert oude versies en configuraties automatisch
 
-## Requirements
+## Auto-Start Functionaliteit
 
-- Windows 7/8/10/11
-- Internet connection
-- Node.js (for development only)
+De agent gebruikt meerdere methoden om betrouwbaar automatisch op te starten:
 
-## Installation
+### Methoden:
+1. **Auto-Launch Library**: Primaire methode voor backwards compatibility
+2. **Windows Registry**: Backup methode via Run keys (HKCU en HKLM)
+3. **Task Scheduler**: Meest betrouwbare methode voor Windows services
+4. **Startup Folders**: Fallback voor speciale configuraties
 
-1. Download the latest release from the releases page
-2. Run the installer
-3. Enter your Device UUID and API Token when prompted
-4. The agent will start automatically
+### Voordelen:
+- **Redundantie**: Als één methode faalt, werken de anderen nog
+- **Compatibiliteit**: Werkt met zowel portable als geïnstalleerde versies
+- **Admin Support**: Ondersteunt zowel gebruiker- als admin-level startup
+- **Self-Healing**: Herconfigureert automatisch bij problemen
 
-## For Developers
+## Cleanup Functionaliteit
 
-### Setup Development Environment
+### Oude Versies Verwijdering:
+- **Proces Terminatie**: Stopt oude versies voordat ze verwijderd worden
+- **Bestand Cleanup**: Verwijdert oude executable bestanden
+- **Registry Cleanup**: Ruimt oude registry entries op
+- **Task Cleanup**: Verwijdert oude scheduled tasks
+- **Startup Cleanup**: Ruimt oude startup shortcuts op
 
-1. Clone the repository
-2. Install dependencies:
-```
-npm install
-```
+### Verbeterde Betrouwbaarheid:
+- **Synchrone Operaties**: Wacht op voltooiing van cleanup acties
+- **Error Handling**: Faalt gracefully bij problemen
+- **Backup Strategieën**: Hernoemt bestanden als verwijdering faalt
+- **Version Detection**: Verwijdert alleen daadwerkelijk oude versies
 
-3. Run the application in development mode:
-```
-npm start
-```
+## Bouwen
 
-### Building an Executable
-
-To build a standalone Windows executable:
-
-```
-npm run package-win
-```
-
-This will create a distributable package in the `dist` folder.
-
-To build an installer:
-
-```
-npm run build
+### Alle Versies:
+```bash
+npm run build-all
 ```
 
-## Configuration
+### Alleen Installer:
+```bash
+npm run build-installer
+```
 
-Configuration is stored in `%PROGRAMDATA%\PulseGuard\config.json` and includes:
+### Alleen Portable:
+```bash
+npm run build-portable
+```
 
-- API token
-- Device UUID
-- Check interval
-- API URL
+## Installatie Types
 
-## Power Management
+### NSIS Installer (Aanbevolen)
+- Volledige installatie met auto-startup configuratie
+- Automatische cleanup van oude versies
+- Start Menu en Desktop shortcuts
+- Proper uninstall ondersteuning
 
-The PulseGuard Agent supports remote power management features:
+### Portable Versie
+- Geen installatie vereist
+- Zelf-configurerende auto-startup
+- Ideaal voor USB drives of tijdelijk gebruik
 
-- **Lock** - Locks the computer
-- **Sleep** - Puts the computer into sleep mode
-- **Restart** - Restarts the computer with a 5-second delay
-- **Shutdown** - Shuts down the computer with a 5-second delay
+## Configuratie
 
-These commands can be sent from the PulseGuard dashboard and will be executed during the next agent check-in.
+De agent wordt automatisch geconfigureerd bij de eerste start. Handmatige configuratie is mogelijk via:
 
-**Note:** Power management commands require administrative privileges. Make sure the agent is installed and running with the appropriate permissions.
+1. **UI Interface**: Open de agent en ga naar instellingen
+2. **Config Bestand**: Bewerk `config.json` in de applicatie directory
+3. **API Endpoints**: Gebruik de REST API voor remote configuratie
+
+## Auto-Start Status Controleren
+
+Vanuit de UI kun je de auto-start status controleren:
+- Ga naar Instellingen → Auto-Start Status
+- Bekijk welke methoden actief zijn
+- Forceer herconfiguratie indien nodig
 
 ## Troubleshooting
 
-Logs are stored in `%PROGRAMDATA%\PulseGuard\logs\agent.log`
+### Auto-Start Werkt Niet:
+1. Controleer admin rechten (run as administrator)
+2. Controleer Windows Security instellingen
+3. Gebruik de "Force Auto-Start Setup" optie in de UI
+4. Check de log bestanden voor error messages
 
-Common issues:
-- **Agent not connecting**: Check your internet connection and firewall settings
-- **High CPU usage**: Check your check interval settings
-- **Agent not starting**: Run as administrator or check Windows event logs
+### Oude Versies Blijven Achter:
+1. Stop alle PulseGuard processen handmatig
+2. Run de "Cleanup Old Versions" optie in de UI
+3. Herstart de agent om cleanup te voltooien
 
-## License
+### Performance Issues:
+1. Verhoog het check interval in instellingen
+2. Schakel onnodige monitoring uit
+3. Check voor conflicterende software
 
-MIT License - See LICENSE file for details 
+## Log Bestanden
+
+Logs worden opgeslagen in:
+- `%APPDATA%/PulseGuard/logs/`
+- `%LOCALAPPDATA%/PulseGuard/logs/`
+
+## Support
+
+Voor ondersteuning, documentatie en updates:
+- Check de applicatie logs voor foutmeldingen
+- Gebruik de "Send Metrics Now" functie voor diagnostics
+- Contact support via de PulseGuard platform
+
+## Changelog
+
+### Versie 1.1.1+
+- **Verbeterde Auto-Start**: Meerdere backup methoden voor betrouwbaarheid
+- **Betere Cleanup**: Synchrone operaties en error handling
+- **NSIS Installer**: Professionele installatie met auto-configuratie
+- **Self-Healing**: Automatische herconfiguratie bij problemen
+- **Enhanced Logging**: Meer gedetailleerde diagnostics 

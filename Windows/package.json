@@ -1,13 +1,16 @@
 {
   "name": "pulseguard-agent",
-  "version": "1.1.0",
+  "version": "1.1.2",
   "description": "PulseGuard Agent for Windows",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
     "prebuild": "node copy-ffmpeg.js",
-    "build": "electron-builder --win portable --x64 --config.nsis.differentialPackage=false --config.win.icon=assets/website-icon.png --config.asar=true",
+    "build": "electron-builder --win --x64 --config.nsis.differentialPackage=false --config.win.icon=assets/website-icon.png --config.asar=true",
+    "build-installer": "electron-builder --win nsis --x64 --config.nsis.differentialPackage=false",
+    "build-portable": "electron-builder --win portable --x64 --config.nsis.differentialPackage=false",
     "build-nosign": "electron-builder --win --x64 --config.win.signAndEditExecutable=false --config.win.signDlls=false",
+    "build-all": "npm run build-installer && npm run build-portable",
     "pack": "electron-builder --dir",
     "dist": "electron-builder",
     "package-win": "electron-packager . PulseGuardAgent --platform=win32 --arch=x64 --out=dist --overwrite --asar --extra-resource=node_modules/electron/dist/ffmpeg.dll --extra-resource=node_modules/ffmpeg-static/ffmpeg.exe",
@@ -22,7 +25,10 @@
   },
   "dependencies": {
     "auto-launch": "^5.0.5",
+    "cors": "^2.8.5",
+    "express": "^5.1.0",
     "ffmpeg-static": "^5.2.0",
+    "multer": "^2.0.1",
     "systeminformation": "^5.18.10"
   },
   "build": {
@@ -51,8 +57,16 @@
     "win": {
       "target": [
         {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
           "target": "portable",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "icon": "assets/website-icon.png",
@@ -61,10 +75,21 @@
       ],
       "signAndEditExecutable": false,
       "signDlls": false,
-      "artifactName": "PulseGuardAgent-${version}.exe"
+      "artifactName": "PulseGuardAgent-${version}.${ext}"
+    },
+    "nsis": {
+      "include": "installer.nsh",
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "PulseGuard Agent",
+      "artifactName": "PulseGuardAgent-Setup-${version}.exe",
+      "runAfterFinish": false,
+      "deleteAppDataOnUninstall": false
     },
     "portable": {
-      "artifactName": "PulseGuardAgent-${version}.exe",
+      "artifactName": "PulseGuardAgent-Portable-${version}.exe",
       "requestExecutionLevel": "admin"
     },
     "extraResources": [

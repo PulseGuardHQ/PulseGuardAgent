@@ -1,12 +1,17 @@
-const { app, BrowserWindow, ipcMain, dialog, Tray, Menu, shell } = require('electron');
+const { app, BrowserWindow, Tray, Menu, dialog, ipcMain, autoUpdater } = require('electron');
+const express = require('express');
+const cors = require('cors');
+const multer = require('multer');
 const path = require('path');
-const fs = require('fs');
-const si = require('systeminformation');
+const fs = require('fs').promises;
+const fsSync = require('fs');
 const os = require('os');
-const { networkInterfaces } = require('os');
+const { exec, spawn } = require('child_process');
+const crypto = require('crypto');
 const https = require('https');
 const http = require('http');
-const { exec } = require('child_process');
+const { networkInterfaces } = require('os');
+const si = require('systeminformation');
 const AutoLaunch = require('auto-launch');
 
 // Ensure ffmpeg is properly loaded
@@ -42,38 +47,67 @@ let lastFullCheckTime = 0;
 // Agent version
 const AGENT_VERSION = app.getVersion() || '1.0.0';
 
-// Default configuration
+// Configuration
 let config = {
-  api_token: '',
-  device_uuid: '',
-  api_base_url: 'http://127.0.0.1:8000',
-  check_interval: 15,
-  full_check_interval: 86400,
-  metrics_enabled: true,
-  ssh_enabled: false,
-  ssh_port: 22,
-  auto_update_check: true, // Enable automatic update checking
-  update_check_interval: 24, // Check for updates every 24 hours
-  auto_cleanup_old_versions: true // Enable automatic cleanup of old versions
+    api_base_url: '',
+    api_token: '',
+    device_uuid: '',
+    device_name: os.hostname(),
+    check_interval: 60000 // 1 minute default
 };
 
+// Express app for API endpoints
+const expressApp = express();
+const PORT = 3001;
+
+// Configure multer for file uploads
+const storage = multer.diskStorage({
+    destination: function (req, file, cb) {
+        const uploadDir = path.join(__dirname, 'uploads');
+        if (!fsSync.existsSync(uploadDir)) {
+            fsSync.mkdirSync(uploadDir, { recursive: true });
+        }
+        cb(null, uploadDir);
+    },
+    filename: function (req, file, cb) {
+        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+        cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
+    }
+});
+
+const upload = multer({ 
+    storage: storage,
+    limits: {
+        fileSize: 100 * 1024 * 1024 // 100MB limit
+    }
+});
+
+// Express middleware
+expressApp.use(cors());
+expressApp.use(express.json({ limit: '50mb' }));
+expressApp.use(express.urlencoded({ extended: true, limit: '50mb' }));
+
 // Ensure directories exist
-function ensureDirectories() {
-  if (!fs.existsSync(installDir)) {
-    fs.mkdirSync(installDir, { recursive: true });
+async function ensureDirectories() {
+  try {
+    await fs.access(installDir);
+  } catch {
+    await fs.mkdir(installDir, { recursive: true });
   }
   
-  if (!fs.existsSync(installDir + '\\logs')) {
-    fs.mkdirSync(installDir + '\\logs', { recursive: true });
+  try {
+    await fs.access(installDir + '\\logs');
+  } catch {
+    await fs.mkdir(installDir + '\\logs', { recursive: true });
   }
 }
 
 // Logger functions
-function logToFile(message, level = 'INFO') {
+async function logToFile(message, level = 'INFO') {
   try {
     const timestamp = new Date().toISOString().replace('T', ' ').substr(0, 19);
     const logMessage = `${timestamp} [${level}] ${message}\n`;
-    fs.appendFileSync(logFile, logMessage);
+    await fs.appendFile(logFile, logMessage);
     console.log(message);
   } catch (error) {
     console.error('Failed to write to log file:', error);
@@ -81,39 +115,39 @@ function logToFile(message, level = 'INFO') {
 }
 
 // Load configuration from file
-function loadConfig() {
+async function loadConfig() {
   try {
-    if (fs.existsSync(configFile)) {
-      const fileContents = fs.readFileSync(configFile, 'utf8');
-      const loadedConfig = JSON.parse(fileContents);
-      config = { ...config, ...loadedConfig };
-      
-      logToFile(`Configuration loaded successfully - API URL: ${config.api_base_url}`);
-      return true;
-    } else {
-      logToFile('Configuration file does not exist yet', 'WARN');
-      return false;
-    }
+    await fs.access(configFile);
+    const fileContents = await fs.readFile(configFile, 'utf8');
+    const loadedConfig = JSON.parse(fileContents);
+    config = { ...config, ...loadedConfig };
+    
+    await logToFile(`Configuration loaded successfully - API URL: ${config.api_base_url}`);
+    return true;
   } catch (error) {
-    logToFile(`Error loading configuration: ${error.message}`, 'ERROR');
+    if (error.code === 'ENOENT') {
+      await logToFile('Configuration file does not exist yet', 'WARN');
+    } else {
+      await logToFile(`Error loading configuration: ${error.message}`, 'ERROR');
+    }
     return false;
   }
 }
 
 // Save configuration to file
-function saveConfig() {
+async function saveConfig() {
   try {
-    fs.writeFileSync(configFile, JSON.stringify(config, null, 2));
-    logToFile('Configuration saved successfully');
+    await fs.writeFile(configFile, JSON.stringify(config, null, 2));
+    await logToFile('Configuration saved successfully');
     return true;
   } catch (error) {
-    logToFile(`Error saving configuration: ${error.message}`, 'ERROR');
+    await logToFile(`Error saving configuration: ${error.message}`, 'ERROR');
     return false;
   }
 }
 
 // Check if running as administrator (Windows)
-function isAdmin() {
+async function isAdmin() {
   return new Promise((resolve) => {
     if (process.platform !== 'win32') {
       resolve(false);
@@ -128,6 +162,7 @@ function isAdmin() {
 
 // Set up auto launch
 function setupAutoLaunch() {
+  // First try the auto-launch library (for backwards compatibility)
   const autoLauncher = new AutoLaunch({
     name: 'PulseGuard Agent',
     path: process.execPath,
@@ -138,16 +173,105 @@ function setupAutoLaunch() {
   autoLauncher.isEnabled().then((isEnabled) => {
     if (!isEnabled) {
       autoLauncher.enable().then(() => {
-        logToFile('Auto-launch enabled');
+        logToFile('Auto-launch enabled via auto-launch library');
+        // Also set up our backup methods
+        setupBackupAutoLaunch();
       }).catch((err) => {
-        logToFile(`Failed to enable auto-launch: ${err.message}`, 'ERROR');
+        logToFile(`Auto-launch library failed: ${err.message}, trying backup methods`, 'WARN');
+        setupBackupAutoLaunch();
       });
     } else {
-      logToFile('Auto-launch is already enabled');
+      logToFile('Auto-launch is already enabled via auto-launch library');
+      // Still set up backup methods to ensure redundancy
+      setupBackupAutoLaunch();
     }
   }).catch((err) => {
-    logToFile(`Auto-launch setup error: ${err.message}`, 'ERROR');
+    logToFile(`Auto-launch library error: ${err.message}, using backup methods`, 'WARN');
+    setupBackupAutoLaunch();
   });
+}
+
+// Backup auto-launch methods for better reliability
+function setupBackupAutoLaunch() {
+  try {
+    // Method 1: Windows Registry Run key
+    setupRegistryAutoLaunch();
+    
+    // Method 2: Windows Task Scheduler (more reliable for services)
+    setupTaskSchedulerAutoLaunch();
+    
+    logToFile('Backup auto-launch methods configured');
+  } catch (error) {
+    logToFile(`Error setting up backup auto-launch: ${error.message}`, 'ERROR');
+  }
+}
+
+function setupRegistryAutoLaunch() {
+  try {
+    const appName = 'PulseGuardAgent';
+    const executablePath = `"${process.execPath}" --startup`;
+    
+    // Add to current user registry (doesn't require admin)
+    const userRegCommand = `reg add "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" /v "${appName}" /t REG_SZ /d "${executablePath}" /f`;
+    
+    exec(userRegCommand, (error, stdout, stderr) => {
+      if (error) {
+        logToFile(`Failed to add user registry auto-launch: ${error.message}`, 'WARN');
+      } else {
+        logToFile('Registry auto-launch (user) configured successfully');
+      }
+    });
+    
+    // Try to add to system registry if we have admin rights
+    isAdmin().then(adminStatus => {
+      if (adminStatus) {
+        const systemRegCommand = `reg add "HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" /v "${appName}" /t REG_SZ /d "${executablePath}" /f`;
+        
+        exec(systemRegCommand, (error, stdout, stderr) => {
+          if (error) {
+            logToFile(`Failed to add system registry auto-launch: ${error.message}`, 'DEBUG');
+          } else {
+            logToFile('Registry auto-launch (system) configured successfully');
+          }
+        });
+      }
+    });
+  } catch (error) {
+    logToFile(`Registry auto-launch setup error: ${error.message}`, 'ERROR');
+  }
+}
+
+function setupTaskSchedulerAutoLaunch() {
+  try {
+    const taskName = 'PulseGuard Agent Startup';
+    const executablePath = process.execPath;
+    
+    // Create a Windows Task Scheduler task for auto-startup
+    // This is more reliable than registry entries for some Windows configurations
+    const createTaskCommand = `schtasks /create /tn "${taskName}" /tr "\\"${executablePath}\\" --startup" /sc onlogon /rl limited /f`;
+    
+    exec(createTaskCommand, (error, stdout, stderr) => {
+      if (error) {
+        logToFile(`Failed to create scheduled task: ${error.message}`, 'DEBUG');
+      } else {
+        logToFile('Scheduled task auto-launch configured successfully');
+        
+        // Set the task to run with highest privileges if we're admin
+        isAdmin().then(adminStatus => {
+          if (adminStatus) {
+            const elevateTaskCommand = `schtasks /change /tn "${taskName}" /rl highest`;
+            exec(elevateTaskCommand, (error) => {
+              if (!error) {
+                logToFile('Scheduled task elevated to highest privileges');
+              }
+            });
+          }
+        });
+      }
+    });
+  } catch (error) {
+    logToFile(`Task scheduler auto-launch setup error: ${error.message}`, 'ERROR');
+  }
 }
 
 // Create main window
@@ -476,34 +600,143 @@ async function testApiConnection() {
   }
 }
 
-// Add support for SSH functionality
-async function setupSshServer() {
+// Remote access functionality (SSH, RDP, VNC)
+async function setupRemoteAccess() {
   try {
-    // Check if SSH is enabled in the agent configuration
-    if (!config.ssh_enabled) {
-      logToFile('SSH server not enabled in configuration', 'INFO');
+    // Check if remote access is enabled in the agent configuration
+    if (!config.remote_access_enabled) {
+      logToFile('Remote access not enabled in configuration', 'INFO');
       return;
     }
 
-    // Get SSH configuration from the server
-    const response = await makeApiRequest('/devices/ssh-config', 'GET');
-    if (response && response.body && response.body.ssh_enabled) {
-      logToFile('SSH configuration received from server', 'INFO');
+    // Get remote access configuration from the server
+    try {
+      const response = await makeApiRequest('/devices/remote-access-config', 'GET');
+      if (response && response.body && response.body.config) {
+        logToFile('Remote access configuration received from server', 'INFO');
       
-      // Update local SSH configuration
-      config.ssh_enabled = response.body.ssh_enabled;
-      config.ssh_port = response.body.ssh_port || 22;
+        const serverConfig = response.body.config;
+        
+        // Update remote access master toggle if provided
+        if (serverConfig.remote_access_enabled !== undefined) {
+          config.remote_access_enabled = serverConfig.remote_access_enabled;
+          logToFile(`Remote access ${config.remote_access_enabled ? 'enabled' : 'disabled'} by server config`, 'INFO');
+          
+          // If remote access is disabled, don't proceed further
+          if (!config.remote_access_enabled) {
+            saveConfig();
+            return;
+          }
+        }
+        
+        // Update SSH configuration
+        if (serverConfig.ssh_enabled !== undefined) {
+          config.ssh_enabled = serverConfig.ssh_enabled;
+          config.ssh_port = serverConfig.ssh_port || 22;
+          logToFile(`SSH ${config.ssh_enabled ? 'enabled' : 'disabled'} on port ${config.ssh_port}`, 'INFO');
+        }
+        
+        // Update RDP configuration
+        if (serverConfig.rdp_enabled !== undefined) {
+          config.rdp_enabled = serverConfig.rdp_enabled;
+          config.rdp_port = serverConfig.rdp_port || 3389;
+          logToFile(`RDP ${config.rdp_enabled ? 'enabled' : 'disabled'} on port ${config.rdp_port}`, 'INFO');
+        }
+        
+        // Update VNC configuration
+        if (serverConfig.vnc_enabled !== undefined) {
+          config.vnc_enabled = serverConfig.vnc_enabled;
+          config.vnc_port = serverConfig.vnc_port || 5900;
+          logToFile(`VNC ${config.vnc_enabled ? 'enabled' : 'disabled'} on port ${config.vnc_port}`, 'INFO');
+        }
       
       // Save updated configuration
       saveConfig();
-      
-      // Start or restart SSH server with new configuration
-      restartSshServer();
+      }
+    } catch (apiError) {
+      logToFile(`Error fetching remote access configuration: ${apiError.message}`, 'WARN');
+      logToFile('Using local configuration for remote access', 'INFO');
+    }
+    
+    // Configure each remote access service based on current configuration
+    if (config.remote_access_enabled) {
+      if (config.ssh_enabled) setupSshServer();
+      if (config.rdp_enabled) setupRdpServer();
+      if (config.vnc_enabled) setupVncServer();
     } else {
-      logToFile('SSH is not enabled on the server or configuration not received', 'INFO');
+      logToFile('Remote access is disabled in configuration', 'INFO');
     }
   } catch (error) {
+    logToFile(`Error setting up remote access: ${error.message}`, 'ERROR');
+  }
+}
+
+// SSH Server Configuration
+async function setupSshServer() {
+  try {
+    if (!config.ssh_enabled) {
+      logToFile('SSH server not enabled, skipping setup', 'INFO');
+      return;
+    }
+    
+    logToFile(`Setting up SSH server on port ${config.ssh_port}`, 'INFO');
+    
+    // Check if OpenSSH is installed on Windows
+    exec('sc query sshd', async (error) => {
+      if (error) {
+        logToFile('OpenSSH Server not installed, attempting to install...', 'INFO');
+        try {
+          // Install OpenSSH Server using PowerShell
+          await installOpenSSH();
+        } catch (installError) {
+          logToFile(`Failed to install OpenSSH: ${installError.message}`, 'ERROR');
+          return;
+        }
+      }
+      
+      // Configure and start SSH server
+      configureAndStartSshServer();
+    });
+  } catch (error) {
     logToFile(`Error setting up SSH server: ${error.message}`, 'ERROR');
+  }
+}
+
+// Install OpenSSH Server on Windows
+function installOpenSSH() {
+  return new Promise((resolve, reject) => {
+    // PowerShell command to install OpenSSH Server
+    const installCommand = 'powershell -Command "Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0"';
+    
+    exec(installCommand, (error, stdout, stderr) => {
+      if (error) {
+        logToFile(`Failed to install OpenSSH Server: ${error.message}`, 'ERROR');
+        reject(error);
+        return;
+      }
+      
+      logToFile('OpenSSH Server installed successfully', 'INFO');
+      resolve();
+    });
+  });
+}
+
+// Configure and start SSH server
+function configureAndStartSshServer() {
+  try {
+    // Set OpenSSH service to auto-start
+    exec('sc config sshd start=auto', (error) => {
+      if (error) {
+        logToFile(`Failed to set OpenSSH service to auto-start: ${error.message}`, 'ERROR');
+      } else {
+        logToFile('OpenSSH service set to auto-start', 'INFO');
+      }
+      
+      // Start or restart the SSH service
+      restartSshServer();
+    });
+  } catch (error) {
+    logToFile(`Error configuring SSH server: ${error.message}`, 'ERROR');
   }
 }
 
@@ -517,18 +750,279 @@ function restartSshServer() {
     
     logToFile(`Starting SSH server on port ${config.ssh_port}`, 'INFO');
     
-    // Use Windows built-in SSH server or third-party implementation
-    // This is a placeholder for the actual implementation
-    exec(`net stop sshd && net start sshd`, (error, stdout, stderr) => {
+    // Stop the service if it's running
+    exec('sc stop sshd', () => {
+      // Start the service
+      exec('sc start sshd', (error, stdout, stderr) => {
       if (error) {
-        logToFile(`Failed to restart SSH server: ${error.message}`, 'ERROR');
+          logToFile(`Failed to start SSH server: ${error.message}`, 'ERROR');
         return;
       }
-      logToFile('SSH server restarted successfully', 'INFO');
+        logToFile('SSH server started successfully', 'INFO');
+        
+        // Configure the Windows Firewall to allow SSH traffic
+        configureFirewallForSSH();
+      });
     });
   } catch (error) {
     logToFile(`Error restarting SSH server: ${error.message}`, 'ERROR');
   }
+}
+
+// Configure Windows Firewall for SSH
+function configureFirewallForSSH() {
+  const port = config.ssh_port || 22;
+  const firewallCommand = `powershell -Command "New-NetFirewallRule -DisplayName 'PulseGuard SSH' -Direction Inbound -LocalPort ${port} -Protocol TCP -Action Allow -Profile Any -Description 'PulseGuard Remote Access - SSH' -ErrorAction SilentlyContinue"`;
+  
+  exec(firewallCommand, (error, stdout, stderr) => {
+    if (error) {
+      logToFile(`Failed to configure firewall for SSH: ${error.message}`, 'WARN');
+      return;
+    }
+    logToFile(`Firewall configured for SSH on port ${port}`, 'INFO');
+  });
+}
+
+// RDP Server Configuration
+function setupRdpServer() {
+  try {
+    if (!config.rdp_enabled) {
+      logToFile('RDP server not enabled, skipping setup', 'INFO');
+      return;
+    }
+    
+    logToFile(`Setting up RDP server on port ${config.rdp_port}`, 'INFO');
+    
+    // Enable Remote Desktop via registry
+    const enableRdpCommand = `powershell -Command "Set-ItemProperty -Path 'HKLM:\\System\\CurrentControlSet\\Control\\Terminal Server' -Name 'fDenyTSConnections' -Value 0"`;
+    exec(enableRdpCommand, (error) => {
+      if (error) {
+        logToFile(`Failed to enable RDP: ${error.message}`, 'ERROR');
+        return;
+      }
+      
+      logToFile('Remote Desktop enabled', 'INFO');
+      
+      // Configure RDP port if different from default
+      if (config.rdp_port && config.rdp_port !== 3389) {
+        const setPortCommand = `powershell -Command "Set-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Terminal Server\\WinStations\\RDP-Tcp' -Name 'PortNumber' -Value ${config.rdp_port}"`;
+        exec(setPortCommand, (portError) => {
+          if (portError) {
+            logToFile(`Failed to change RDP port: ${portError.message}`, 'ERROR');
+          } else {
+            logToFile(`RDP port set to ${config.rdp_port}`, 'INFO');
+          }
+          
+          // Configure firewall for RDP
+          configureFirewallForRDP();
+          
+          // Restart RDP service
+          restartRdpService();
+        });
+      } else {
+        // Use default port
+        configureFirewallForRDP();
+      }
+    });
+  } catch (error) {
+    logToFile(`Error setting up RDP server: ${error.message}`, 'ERROR');
+  }
+}
+
+// Configure Windows Firewall for RDP
+function configureFirewallForRDP() {
+  const port = config.rdp_port || 3389;
+  const firewallCommand = `powershell -Command "New-NetFirewallRule -DisplayName 'PulseGuard RDP' -Direction Inbound -LocalPort ${port} -Protocol TCP -Action Allow -Profile Any -Description 'PulseGuard Remote Access - RDP' -ErrorAction SilentlyContinue"`;
+  
+  exec(firewallCommand, (error, stdout, stderr) => {
+    if (error) {
+      logToFile(`Failed to configure firewall for RDP: ${error.message}`, 'WARN');
+      return;
+    }
+    logToFile(`Firewall configured for RDP on port ${port}`, 'INFO');
+  });
+}
+
+// Restart Remote Desktop Service
+function restartRdpService() {
+  exec('net stop TermService && net start TermService', (error) => {
+    if (error) {
+      logToFile(`Failed to restart Remote Desktop service: ${error.message}`, 'ERROR');
+      return;
+    }
+    logToFile('Remote Desktop service restarted successfully', 'INFO');
+  });
+}
+
+// VNC Server Configuration
+function setupVncServer() {
+  try {
+    if (!config.vnc_enabled) {
+      logToFile('VNC server not enabled, skipping setup', 'INFO');
+      return;
+    }
+    
+    logToFile(`Setting up VNC server on port ${config.vnc_port}`, 'INFO');
+    
+    // For VNC, we'll use TightVNC which we'll need to download and install silently
+    // Check if TightVNC is already installed
+    checkAndInstallTightVNC();
+  } catch (error) {
+    logToFile(`Error setting up VNC server: ${error.message}`, 'ERROR');
+  }
+}
+
+// Check if TightVNC is installed, if not download and install it
+function checkAndInstallTightVNC() {
+  const tightVNCPath = path.join(installDir, 'tightvnc');
+  const tightVNCExe = path.join(tightVNCPath, 'tvnserver.exe');
+  
+  // Check if the TightVNC executable exists
+  if (fs.existsSync(tightVNCExe)) {
+    logToFile('TightVNC already installed, configuring...', 'INFO');
+    configureTightVNC();
+    return;
+  }
+  
+  // Create directory if it doesn't exist
+  if (!fs.existsSync(tightVNCPath)) {
+    fs.mkdirSync(tightVNCPath, { recursive: true });
+  }
+  
+  // Download and install TightVNC
+  const downloadUrl = 'https://www.tightvnc.com/download/2.8.59/tightvnc-2.8.59-gpl-setup-64bit.msi';
+  const installerPath = path.join(tightVNCPath, 'tightvnc-installer.msi');
+  
+  logToFile('Downloading TightVNC installer...', 'INFO');
+  
+  // Download the installer
+  const file = fs.createWriteStream(installerPath);
+  https.get(downloadUrl, function(response) {
+    response.pipe(file);
+    file.on('finish', function() {
+      file.close(() => {
+        logToFile('TightVNC installer downloaded, installing...', 'INFO');
+        
+        // Install TightVNC silently
+        const installCommand = `msiexec /i "${installerPath}" /quiet /norestart ADDLOCAL="Server" SERVER_REGISTER_AS_SERVICE=1 SERVER_ADD_FIREWALL_EXCEPTION=1 SERVER_ALLOW_SAS=1`;
+        exec(installCommand, (error, stdout, stderr) => {
+          if (error) {
+            logToFile(`Failed to install TightVNC: ${error.message}`, 'ERROR');
+            return;
+          }
+          
+          logToFile('TightVNC installed successfully', 'INFO');
+          
+          // Configure TightVNC after installation
+          setTimeout(() => {
+            configureTightVNC();
+          }, 5000); // Wait 5 seconds to ensure installation is complete
+        });
+      });
+    });
+  }).on('error', function(err) {
+    fs.unlink(installerPath, () => {});
+    logToFile(`Failed to download TightVNC: ${err.message}`, 'ERROR');
+  });
+}
+
+// Configure TightVNC with our settings
+function configureTightVNC() {
+  try {
+    const port = config.vnc_port || 5900;
+    
+    // Configure TightVNC settings via registry
+    const vncConfigCommands = [
+      // Set VNC port
+      `reg add "HKLM\\SOFTWARE\\TightVNC\\Server" /v "RfbPort" /t REG_DWORD /d "${port}" /f`,
+      // Enable VNC server
+      `reg add "HKLM\\SOFTWARE\\TightVNC\\Server" /v "EnableRfbServer" /t REG_DWORD /d "1" /f`,
+      // Set password (would use a secure mechanism in a real implementation)
+      `reg add "HKLM\\SOFTWARE\\TightVNC\\Server" /v "Password" /t REG_BINARY /d "0123456789abcdef" /f`,
+      // Add firewall exception
+      `netsh advfirewall firewall add rule name="TightVNC Server" dir=in action=allow protocol=TCP localport=${port}`,
+      // Restart TightVNC service
+      `net stop tvnserver && net start tvnserver`
+    ];
+    
+    // Execute the commands in sequence
+    for (const command of vncConfigCommands) {
+      exec(command, (error, stdout, stderr) => {
+        if (error) {
+          logToFile(`VNC configuration error: ${error.message}`, 'ERROR');
+        }
+      });
+    }
+    
+    logToFile(`TightVNC configured on port ${port}`, 'INFO');
+  } catch (error) {
+    logToFile(`Error configuring TightVNC: ${error.message}`, 'ERROR');
+  }
+}
+
+// Get the status of remote access services
+async function getRemoteServicesStatus() {
+  const remoteServices = [];
+  
+  try {
+    // Check SSH service status
+    if (config.ssh_enabled) {
+      try {
+        const sshStatus = await checkServiceRunning('sshd');
+        remoteServices.push({
+          name: 'SSH Server (PulseGuard)',
+          status: sshStatus ? 'running' : 'stopped'
+        });
+      } catch (e) {
+        logToFile(`Error checking SSH service: ${e.message}`, 'DEBUG');
+      }
+    }
+    
+    // Check RDP service status
+    if (config.rdp_enabled) {
+      try {
+        const rdpStatus = await checkServiceRunning('TermService');
+        remoteServices.push({
+          name: 'Remote Desktop (PulseGuard)',
+          status: rdpStatus ? 'running' : 'stopped'
+        });
+      } catch (e) {
+        logToFile(`Error checking RDP service: ${e.message}`, 'DEBUG');
+      }
+    }
+    
+    // Check VNC service status
+    if (config.vnc_enabled) {
+      try {
+        const vncStatus = await checkServiceRunning('tvnserver');
+        remoteServices.push({
+          name: 'VNC Server (PulseGuard)',
+          status: vncStatus ? 'running' : 'stopped'
+        });
+      } catch (e) {
+        logToFile(`Error checking VNC service: ${e.message}`, 'DEBUG');
+      }
+    }
+  } catch (error) {
+    logToFile(`Error getting remote services status: ${error.message}`, 'ERROR');
+  }
+  
+  return remoteServices;
+}
+
+// Check if a Windows service is running
+function checkServiceRunning(serviceName) {
+  return new Promise((resolve, reject) => {
+    exec(`sc query ${serviceName} | findstr "RUNNING"`, (error, stdout) => {
+      if (error) {
+        // Service might not be installed or not running
+        resolve(false);
+        return;
+      }
+      
+      resolve(stdout.toLowerCase().includes('running'));
+    });
+  });
 }
 
 // Check for scheduled power actions
@@ -773,6 +1267,10 @@ async function createFullPayload() {
           name: service.name || service.display_name || "Unknown Service",
           status: service.running ? 'running' : 'stopped'
         }));
+        
+        // Add remote access service statuses
+        const remoteServicesStatus = await getRemoteServicesStatus();
+        services = services.concat(remoteServicesStatus);
       } catch (e) {
         logToFile(`Error getting services: ${e.message}`, 'DEBUG');
       }
@@ -912,16 +1410,42 @@ async function collectAndSendMetrics(forceFullUpdate = false) {
           }
         }
         
-        // Check for SSH configuration updates
+        // Check for remote access configuration updates
+        let remoteAccessChanged = false;
+        
+        // Remote access master toggle
+        if (response.body.config.remote_access_enabled !== undefined) {
+          config.remote_access_enabled = response.body.config.remote_access_enabled;
+          remoteAccessChanged = true;
+        }
+        
+        // SSH configuration updates
         if (response.body.config.ssh_enabled !== undefined) {
           config.ssh_enabled = response.body.config.ssh_enabled;
           config.ssh_port = response.body.config.ssh_port || 22;
+          remoteAccessChanged = true;
+        }
+        
+        // RDP configuration updates
+        if (response.body.config.rdp_enabled !== undefined) {
+          config.rdp_enabled = response.body.config.rdp_enabled;
+          config.rdp_port = response.body.config.rdp_port || 3389;
+          remoteAccessChanged = true;
+        }
+        
+        // VNC configuration updates
+        if (response.body.config.vnc_enabled !== undefined) {
+          config.vnc_enabled = response.body.config.vnc_enabled;
+          config.vnc_port = response.body.config.vnc_port || 5900;
+          remoteAccessChanged = true;
+        }
+        
+        // If any remote access setting changed, save config and update services
+        if (remoteAccessChanged) {
           saveConfig();
           
-          // Update SSH server if needed
-          if (config.ssh_enabled) {
-            setupSshServer();
-          }
+          // Update remote access services
+          setupRemoteAccess();
         }
       }
       
@@ -1060,8 +1584,8 @@ ipcMain.on('save-config', async (event, { deviceUUID, apiToken }) => {
     config.api_token = apiToken;
     
     // Save config to file
-    ensureDirectories();
-    if (saveConfig()) {
+    await ensureDirectories();
+    if (await saveConfig()) {
       event.reply('config-saved');
       
       // Test API connection with new config
@@ -1128,7 +1652,7 @@ ipcMain.on('update-api-url', async (event, apiUrl) => {
     config.api_base_url = apiUrl;
     
     // Save config to file
-    if (saveConfig()) {
+    if (await saveConfig()) {
       // Test connection with new URL
       const connectionSuccess = await testApiConnection();
       
@@ -1171,8 +1695,14 @@ const isStartup = process.argv.includes('--startup');
 
 // App ready event
 app.on('ready', async () => {
-  ensureDirectories();
-  loadConfig();
+  await ensureDirectories();
+  await loadConfig();
+  
+  // Perform cleanup of old versions FIRST (before anything else)
+  await performOldVersionCleanup();
+  
+  // Start Express server for API endpoints
+  startExpressServer();
   
   // Check if admin
   const adminStatus = await isAdmin();
@@ -1203,10 +1733,8 @@ app.on('ready', async () => {
   // Start update checker
   startUpdateChecker();
   
-  // Perform cleanup of old versions (delayed to not slow down startup)
-  setTimeout(() => {
-    performOldVersionCleanup();
-  }, 10000); // Wait 10 seconds after startup
+  // Initialize remote access services
+  setupRemoteAccess();
 });
 
 // Handle window activation
@@ -1495,20 +2023,33 @@ function cleanupOldVersions() {
     // Common installation directories where old versions might be stored
     const commonDirs = [
       path.join(os.homedir(), 'AppData', 'Local', 'Programs'),
+      path.join(os.homedir(), 'AppData', 'Local', 'Programs', 'PulseGuard'),
+      path.join(os.homedir(), 'AppData', 'Local', 'Programs', 'pulseguard-agent'),
+      path.join(os.homedir(), 'AppData', 'Roaming', 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup'),
+      path.join(process.env.PROGRAMDATA || 'C:\\ProgramData', 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup'),
       path.join(process.env.PROGRAMFILES || 'C:\\Program Files'),
+      path.join(process.env.PROGRAMFILES || 'C:\\Program Files', 'PulseGuard'),
       path.join(process.env['PROGRAMFILES(X86)'] || 'C:\\Program Files (x86)'),
-      path.join(os.homedir(), 'Downloads')
+      path.join(process.env['PROGRAMFILES(X86)'] || 'C:\\Program Files (x86)', 'PulseGuard'),
+      path.join(os.homedir(), 'Downloads'),
+      path.join(os.homedir(), 'Desktop'),
+      path.join(os.homedir(), 'Documents'),
+      'C:\\PulseGuard',
+      'C:\\Program Files\\PulseGuard',
+      'C:\\Program Files (x86)\\PulseGuard'
     ];
     
     // Patterns to look for old PulseGuard files
     const pulseguardPatterns = [
       /PulseGuardAgent.*\.exe$/i,
       /PulseGuard.*Agent.*\.exe$/i,
-      /pulseguard.*agent.*\.exe$/i
+      /pulseguard.*agent.*\.exe$/i,
+      /PulseGuard-.*\.exe$/i,
+      /pulseguard-.*\.exe$/i
     ];
     
     for (const dir of commonDirs) {
-      if (fs.existsSync(dir)) {
+      if (fsSync.existsSync(dir)) {
         cleanupDirectory(dir, pulseguardPatterns);
       }
     }
@@ -1516,14 +2057,18 @@ function cleanupOldVersions() {
     // Also cleanup temporary directories
     const tempDirs = [
       os.tmpdir(),
-      path.join(os.homedir(), 'AppData', 'Local', 'Temp')
+      path.join(os.homedir(), 'AppData', 'Local', 'Temp'),
+      path.join(process.env.WINDIR || 'C:\\Windows', 'Temp')
     ];
     
     for (const tempDir of tempDirs) {
-      if (fs.existsSync(tempDir)) {
+      if (fsSync.existsSync(tempDir)) {
         cleanupDirectory(tempDir, pulseguardPatterns);
       }
     }
+    
+    // Clean up old auto-launch entries
+    cleanupOldAutoLaunchEntries();
     
     logToFile('Old version cleanup completed');
   } catch (error) {
@@ -1533,14 +2078,15 @@ function cleanupOldVersions() {
 
 function cleanupDirectory(directory, patterns) {
   try {
-    const files = fs.readdirSync(directory);
+    const files = fsSync.readdirSync(directory);
     const currentExecutable = process.execPath;
+    const currentExecutableName = path.basename(currentExecutable);
     
     for (const file of files) {
       const fullPath = path.join(directory, file);
       
       // Skip if it's the current running executable
-      if (fullPath === currentExecutable) {
+      if (fullPath === currentExecutable || file === currentExecutableName) {
         continue;
       }
       
@@ -1549,19 +2095,59 @@ function cleanupDirectory(directory, patterns) {
       
       if (matchesPattern) {
         try {
-          const stats = fs.statSync(fullPath);
+          const stats = fsSync.statSync(fullPath);
           
-          // Only delete files that are older than 1 hour (to avoid deleting currently downloading files)
-          const oneHourAgo = Date.now() - (60 * 60 * 1000);
-          if (stats.mtime.getTime() < oneHourAgo) {
-            fs.unlinkSync(fullPath);
-            logToFile(`Removed old version file: ${fullPath}`);
+          // Check if it's actually an older version by looking at file version or date
+          // Only delete files that are older than 30 minutes (to avoid deleting currently downloading files)
+          const thirtyMinutesAgo = Date.now() - (30 * 60 * 1000);
+          if (stats.mtime.getTime() < thirtyMinutesAgo) {
+            // Try to kill the process if it's running (synchronously)
+            try {
+              const processName = path.basename(fullPath, '.exe');
+              exec(`taskkill /F /IM "${processName}.exe"`, () => {}); // Fire and forget
+              
+              // Wait a moment for the process to terminate
+              const maxWaitTime = 3000; // 3 seconds max
+              const startTime = Date.now();
+              let processKilled = false;
+              
+              while (!processKilled && (Date.now() - startTime) < maxWaitTime) {
+                try {
+                  // Try to access the file - if it fails, the process might still be running
+                  fsSync.accessSync(fullPath, fsSync.constants.W_OK);
+                  processKilled = true;
+                } catch (accessError) {
+                  // Wait 100ms and try again
+                  const waitStart = Date.now();
+                  while (Date.now() - waitStart < 100) {
+                    // Busy wait for 100ms
+                  }
+                }
+              }
+            } catch (killError) {
+              // Ignore kill errors
+            }
+            
+            // Try to delete the file
+            try {
+              fsSync.unlinkSync(fullPath);
+              logToFile(`Removed old version file: ${fullPath}`);
+            } catch (deleteError) {
+              // If deletion fails, try to rename it so it doesn't interfere
+              try {
+                const deletedPath = fullPath + '.deleted_' + Date.now();
+                fsSync.renameSync(fullPath, deletedPath);
+                logToFile(`Marked old version for deletion: ${deletedPath}`);
+              } catch (renameError) {
+                logToFile(`Could not delete or mark ${fullPath}: ${deleteError.message}`, 'DEBUG');
+              }
+            }
           } else {
             logToFile(`Skipping recent file: ${fullPath}`, 'DEBUG');
           }
-        } catch (deleteError) {
+        } catch (statError) {
           // File might be in use or protected, log but don't fail
-          logToFile(`Could not delete ${fullPath}: ${deleteError.message}`, 'DEBUG');
+          logToFile(`Could not access ${fullPath}: ${statError.message}`, 'DEBUG');
         }
       }
     }
@@ -1577,6 +2163,9 @@ function cleanupOldRegistryEntries() {
   try {
     logToFile('Cleaning up old registry entries...');
     
+    // Use synchronous execution for more reliable cleanup
+    const { execSync } = require('child_process');
+    
     // Common registry paths where old versions might be registered
     const registryPaths = [
       'HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
@@ -1585,63 +2174,209 @@ function cleanupOldRegistryEntries() {
     ];
     
     for (const regPath of registryPaths) {
-      const command = `reg query "${regPath}" /f "PulseGuard" /s`;
-      
-      exec(command, (error, stdout, stderr) => {
-        if (!error && stdout) {
+      try {
+        const command = `reg query "${regPath}" /f "PulseGuard" /s 2>nul`;
+        const stdout = execSync(command, { encoding: 'utf8', timeout: 10000 });
+        
+        if (stdout) {
           // Parse the output to find old PulseGuard entries
           const lines = stdout.split('\n');
           for (const line of lines) {
             if (line.includes('PulseGuard') && line.includes('HKEY_')) {
               const keyPath = line.trim();
               
-              // Check if this is an old version by querying the version
-              exec(`reg query "${keyPath}" /v "DisplayVersion"`, (versionError, versionStdout) => {
-                if (!versionError && versionStdout) {
+              try {
+                // Check if this is an old version by querying the version
+                const versionCommand = `reg query "${keyPath}" /v "DisplayVersion" 2>nul`;
+                const versionStdout = execSync(versionCommand, { encoding: 'utf8', timeout: 5000 });
+                
+                if (versionStdout) {
                   const versionMatch = versionStdout.match(/DisplayVersion\s+REG_SZ\s+([\d.]+)/);
                   if (versionMatch) {
                     const installedVersion = versionMatch[1];
                     if (isNewerVersion(AGENT_VERSION, installedVersion)) {
                       // This is an older version, remove it
-                      exec(`reg delete "${keyPath}" /f`, (deleteError) => {
-                        if (!deleteError) {
-                          logToFile(`Removed old registry entry: ${keyPath} (version ${installedVersion})`);
-                        } else {
-                          logToFile(`Could not remove registry entry ${keyPath}: ${deleteError.message}`, 'DEBUG');
-                        }
-                      });
+                      try {
+                        execSync(`reg delete "${keyPath}" /f`, { timeout: 5000 });
+                        logToFile(`Removed old registry entry: ${keyPath} (version ${installedVersion})`);
+                      } catch (deleteError) {
+                        logToFile(`Could not remove registry entry ${keyPath}: ${deleteError.message}`, 'DEBUG');
+                      }
                     }
                   }
                 }
-              });
+              } catch (versionError) {
+                // Skip if we can't read version
+                logToFile(`Could not read version for ${keyPath}`, 'DEBUG');
+              }
             }
           }
         }
-      });
+      } catch (queryError) {
+        // Skip this registry path if we can't access it
+        logToFile(`Could not query registry path ${regPath}: ${queryError.message}`, 'DEBUG');
+      }
     }
   } catch (error) {
     logToFile(`Error during registry cleanup: ${error.message}`, 'ERROR');
   }
 }
 
+// Function to clean up old auto-launch entries
+function cleanupOldAutoLaunchEntries() {
+  try {
+    logToFile('Cleaning up old auto-launch entries...');
+    
+    const { execSync } = require('child_process');
+    
+    // Clean up old registry entries
+    const autoLaunchKeys = [
+      'HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run',
+      'HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\Run'
+    ];
+    
+    for (const regKey of autoLaunchKeys) {
+      try {
+        // Look for old PulseGuard entries
+        const command = `reg query "${regKey}" 2>nul | findstr /i "pulseguard"`;
+        const stdout = execSync(command, { encoding: 'utf8', timeout: 5000 });
+        
+        if (stdout) {
+          const lines = stdout.split('\n');
+          for (const line of lines) {
+            const match = line.trim().match(/(\w+)\s+REG_SZ\s+(.+)/);
+            if (match) {
+              const valueName = match[1];
+              const executablePath = match[2].replace(/"/g, ''); // Remove quotes
+              
+              // If this is not the current executable path, remove it
+              if (executablePath !== process.execPath && 
+                  !executablePath.includes(path.basename(process.execPath)) &&
+                  executablePath.toLowerCase().includes('pulseguard')) {
+                try {
+                  execSync(`reg delete "${regKey}" /v "${valueName}" /f`, { timeout: 5000 });
+                  logToFile(`Removed old auto-launch entry: ${valueName} -> ${executablePath}`);
+                } catch (deleteError) {
+                  logToFile(`Could not remove auto-launch entry ${valueName}: ${deleteError.message}`, 'DEBUG');
+                }
+              }
+            }
+          }
+        }
+      } catch (queryError) {
+        // Skip this registry key if we can't access it
+        logToFile(`Could not query auto-launch registry ${regKey}: ${queryError.message}`, 'DEBUG');
+      }
+    }
+    
+    // Clean up old scheduled tasks
+    try {
+      const taskListCommand = `schtasks /query /fo csv | findstr /i "pulseguard"`;
+      const stdout = execSync(taskListCommand, { encoding: 'utf8', timeout: 10000 });
+      
+      if (stdout) {
+        const lines = stdout.split('\n');
+        for (const line of lines) {
+          if (line.includes('PulseGuard') || line.includes('pulseguard')) {
+            // Parse CSV format: "TaskName","Status",...
+            const taskMatch = line.match(/"([^"]*PulseGuard[^"]*)"/i);
+            if (taskMatch) {
+              const taskName = taskMatch[1];
+              
+              // Don't delete our current task
+              if (taskName !== 'PulseGuard Agent Startup') {
+                try {
+                  execSync(`schtasks /delete /tn "${taskName}" /f`, { timeout: 5000 });
+                  logToFile(`Removed old scheduled task: ${taskName}`);
+                } catch (deleteError) {
+                  logToFile(`Could not remove scheduled task ${taskName}: ${deleteError.message}`, 'DEBUG');
+                }
+              }
+            }
+          }
+        }
+      }
+    } catch (taskError) {
+      logToFile(`Could not query scheduled tasks: ${taskError.message}`, 'DEBUG');
+    }
+    
+    // Also clean up startup folder shortcuts
+    const startupFolders = [
+      path.join(os.homedir(), 'AppData', 'Roaming', 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup'),
+      path.join(process.env.PROGRAMDATA || 'C:\\ProgramData', 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup')
+    ];
+    
+    for (const startupFolder of startupFolders) {
+      if (fsSync.existsSync(startupFolder)) {
+        try {
+          const files = fsSync.readdirSync(startupFolder);
+          for (const file of files) {
+            if (file.toLowerCase().includes('pulseguard') && (file.endsWith('.lnk') || file.endsWith('.exe'))) {
+              const fullPath = path.join(startupFolder, file);
+              try {
+                fsSync.unlinkSync(fullPath);
+                logToFile(`Removed old startup file: ${fullPath}`);
+              } catch (deleteError) {
+                logToFile(`Could not remove startup file ${fullPath}: ${deleteError.message}`, 'DEBUG');
+              }
+            }
+          }
+        } catch (readError) {
+          logToFile(`Could not read startup folder ${startupFolder}: ${readError.message}`, 'DEBUG');
+        }
+      }
+    }
+  } catch (error) {
+    logToFile(`Error cleaning up auto-launch entries: ${error.message}`, 'ERROR');
+  }
+}
+
 // Function to perform complete cleanup of old versions
 function performOldVersionCleanup() {
-  if (!config.auto_cleanup_old_versions) {
-    logToFile('Automatic cleanup of old versions is disabled');
-    return;
-  }
-  
-  logToFile('Performing comprehensive cleanup of old PulseGuard versions...');
-  
-  // Cleanup files
-  cleanupOldVersions();
-  
-  // Cleanup registry entries (Windows only)
-  if (process.platform === 'win32') {
-    cleanupOldRegistryEntries();
-  }
-  
-  logToFile('Old version cleanup process completed');
+  return new Promise(async (resolve) => {
+    try {
+      logToFile('Performing comprehensive cleanup of old PulseGuard versions...');
+      
+      // First, cleanup files (this includes process termination)
+      cleanupOldVersions();
+      
+      // Wait a moment for file operations to complete
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      
+      // Cleanup registry entries (Windows only)
+      if (process.platform === 'win32') {
+        cleanupOldRegistryEntries();
+        
+        // Wait for registry operations to complete
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+      
+      // Perform a final check and log the results
+      logToFile('Old version cleanup process completed successfully');
+      
+      // Check if auto-startup is working after cleanup
+      setTimeout(async () => {
+        try {
+          const startupStatus = await checkAutoStartupStatus();
+          const hasAnyStartup = Object.values(startupStatus).some(status => status === true);
+          
+          if (!hasAnyStartup) {
+            logToFile('No auto-startup methods detected after cleanup, reconfiguring...', 'WARN');
+            setupAutoLaunch();
+          } else {
+            logToFile(`Auto-startup status after cleanup: ${JSON.stringify(startupStatus)}`);
+          }
+        } catch (error) {
+          logToFile(`Error checking auto-startup after cleanup: ${error.message}`, 'WARN');
+        }
+        resolve();
+      }, 3000);
+      
+    } catch (error) {
+      logToFile(`Error during cleanup: ${error.message}`, 'ERROR');
+      resolve(); // Don't block startup even if cleanup fails
+    }
+  });
 }
 
 // Cleanup old versions from UI
@@ -1653,6 +2388,851 @@ ipcMain.on('cleanup-old-versions', async (event) => {
   } catch (error) {
     logToFile(`Manual cleanup failed: ${error.message}`, 'ERROR');
     event.reply('cleanup-result', { 
+      success: false, 
+      error: error.message 
+    });
+  }
+});
+
+// SSH Command Execution Functions
+async function executeSshCommand(command, params = {}) {
+    logToFile(`Executing SSH command: ${command}`, 'INFO');
+    
+    try {
+        switch (command) {
+            case 'execute_shell':
+                return await executeShellCommand(params.command, params.timeout || 30000);
+            case 'get_processes':
+                return await getProcessList(params.filter);
+            case 'kill_process':
+                return await killProcess(params.pid, params.force);
+            case 'get_services':
+                return await getServicesList(params.status);
+            case 'control_service':
+                return await controlService(params.name, params.action);
+            case 'list_directory':
+                return await listDirectory(params.path, params.recursive);
+            case 'create_directory':
+                return await createDirectory(params.path);
+            case 'delete_file':
+                return await deleteFile(params.path, params.force);
+            case 'copy_file':
+                return await copyFile(params.source, params.destination);
+            case 'move_file':
+                return await moveFile(params.source, params.destination);
+            case 'read_file':
+                return await readFile(params.path, params.lines);
+            case 'write_file':
+                return await writeFile(params.path, params.content, params.append);
+            case 'get_file_info':
+                return await getFileInfo(params.path);
+            case 'network_ping':
+                return await networkPing(params.host, params.count);
+            case 'network_traceroute':
+                return await networkTraceroute(params.host);
+            case 'network_netstat':
+                return await networkNetstat(params.filter);
+            case 'get_disk_usage':
+                return await getDiskUsage(params.path);
+            case 'get_network_interfaces':
+                return await getNetworkInterfaces();
+            case 'get_event_logs':
+                return await getEventLogs(params.logName, params.count);
+            case 'get_installed_software':
+                return await getInstalledSoftware();
+            case 'get_environment_variables':
+                return await getEnvironmentVariables();
+            case 'set_environment_variable':
+                return await setEnvironmentVariable(params.name, params.value, params.scope);
+            case 'get_registry_value':
+                return await getRegistryValue(params.key, params.value);
+            case 'set_registry_value':
+                return await setRegistryValue(params.key, params.value, params.data, params.type);
+            case 'backup_files':
+                return await backupFiles(params.sources, params.destination);
+            case 'restore_files':
+                return await restoreFiles(params.backup, params.destination);
+            case 'system_scan':
+                return await performSystemScan(params.type);
+            case 'cleanup_temp':
+                return await cleanupTempFiles();
+            case 'defragment_disk':
+                return await defragmentDisk(params.drive);
+            case 'check_disk':
+                return await checkDisk(params.drive, params.fix);
+            default:
+                throw new Error(`Unknown SSH command: ${command}`);
+        }
+    } catch (error) {
+        logToFile(`SSH command error: ${error.message}`, 'ERROR');
+        throw error;
+    }
+}
+
+// Shell Command Execution
+async function executeShellCommand(command, timeout = 30000) {
+    return new Promise((resolve, reject) => {
+        const { exec } = require('child_process');
+        
+        const child = exec(command, { 
+            timeout: timeout,
+            maxBuffer: 1024 * 1024 * 10 // 10MB buffer
+        }, (error, stdout, stderr) => {
+            if (error) {
+                if (error.killed) {
+                    reject(new Error(`Command timed out after ${timeout}ms`));
+                } else {
+                    reject(new Error(`Command failed: ${error.message}`));
+                }
+                return;
+            }
+            
+            resolve({
+                success: true,
+                stdout: stdout.trim(),
+                stderr: stderr.trim(),
+                exitCode: 0
+            });
+        });
+        
+        // Handle timeout manually
+        setTimeout(() => {
+            child.kill();
+            reject(new Error(`Command timed out after ${timeout}ms`));
+        }, timeout);
+    });
+}
+
+// Process Management
+async function getProcessList(filter = null) {
+    try {
+        const command = filter ? 
+            `Get-Process | Where-Object { $_.Name -like "*${filter}*" } | Select-Object Id, ProcessName, CPU, WorkingSet, StartTime | ConvertTo-Json` :
+            `Get-Process | Select-Object Id, ProcessName, CPU, WorkingSet, StartTime | ConvertTo-Json`;
+        
+        const result = await executeShellCommand(`powershell -Command "${command}"`);
+        const processes = JSON.parse(result.stdout);
+        
+        return {
+            success: true,
+            processes: Array.isArray(processes) ? processes : [processes]
+        };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+async function killProcess(pid, force = false) {
+    try {
+        const command = force ? 
+            `taskkill /PID ${pid} /F` : 
+            `taskkill /PID ${pid}`;
+        
+        await executeShellCommand(command);
+        return { success: true, message: `Process ${pid} terminated` };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+// Service Management
+async function getServicesList(status = null) {
+    try {
+        const command = status ? 
+            `Get-Service | Where-Object { $_.Status -eq "${status}" } | Select-Object Name, Status, StartType, DisplayName | ConvertTo-Json` :
+            `Get-Service | Select-Object Name, Status, StartType, DisplayName | ConvertTo-Json`;
+        
+        const result = await executeShellCommand(`powershell -Command "${command}"`);
+        const services = JSON.parse(result.stdout);
+        
+        return {
+            success: true,
+            services: Array.isArray(services) ? services : [services]
+        };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+async function controlService(serviceName, action) {
+    try {
+        let command;
+        switch (action) {
+            case 'start':
+                command = `Start-Service -Name "${serviceName}"`;
+                break;
+            case 'stop':
+                command = `Stop-Service -Name "${serviceName}"`;
+                break;
+            case 'restart':
+                command = `Restart-Service -Name "${serviceName}"`;
+                break;
+            case 'pause':
+                command = `Suspend-Service -Name "${serviceName}"`;
+                break;
+            case 'resume':
+                command = `Resume-Service -Name "${serviceName}"`;
+                break;
+            default:
+                throw new Error(`Invalid service action: ${action}`);
+        }
+        
+        await executeShellCommand(`powershell -Command "${command}"`);
+        return { success: true, message: `Service ${serviceName} ${action}ed successfully` };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+// File Management
+async function listDirectory(path, recursive = false) {
+    try {
+        const command = recursive ? 
+            `Get-ChildItem -Path "${path}" -Recurse | Select-Object Name, FullName, Length, LastWriteTime, Attributes | ConvertTo-Json` :
+            `Get-ChildItem -Path "${path}" | Select-Object Name, FullName, Length, LastWriteTime, Attributes | ConvertTo-Json`;
+        
+        const result = await executeShellCommand(`powershell -Command "${command}"`);
+        const items = JSON.parse(result.stdout);
+        
+        return {
+            success: true,
+            items: Array.isArray(items) ? items : [items]
+        };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+async function createDirectory(path) {
+    try {
+        await executeShellCommand(`powershell -Command "New-Item -Path '${path}' -ItemType Directory -Force"`);
+        return { success: true, message: `Directory created: ${path}` };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+async function deleteFile(path, force = false) {
+    try {
+        const command = force ? 
+            `Remove-Item -Path "${path}" -Force -Recurse` :
+            `Remove-Item -Path "${path}"`;
+        
+        await executeShellCommand(`powershell -Command "${command}"`);
+        return { success: true, message: `File/Directory deleted: ${path}` };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+async function copyFile(source, destination) {
+    try {
+        await executeShellCommand(`powershell -Command "Copy-Item -Path '${source}' -Destination '${destination}' -Force"`);
+        return { success: true, message: `File copied from ${source} to ${destination}` };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+async function moveFile(source, destination) {
+    try {
+        await executeShellCommand(`powershell -Command "Move-Item -Path '${source}' -Destination '${destination}' -Force"`);
+        return { success: true, message: `File moved from ${source} to ${destination}` };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+async function readFile(path, lines = null) {
+    try {
+        const command = lines ? 
+            `Get-Content -Path "${path}" -TotalCount ${lines}` :
+            `Get-Content -Path "${path}"`;
+        
+        const result = await executeShellCommand(`powershell -Command "${command}"`);
+        return {
+            success: true,
+            content: result.stdout,
+            encoding: 'utf-8'
+        };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+async function writeFile(path, content, append = false) {
+    try {
+        const command = append ? 
+            `Add-Content -Path "${path}" -Value "${content}"` :
+            `Set-Content -Path "${path}" -Value "${content}"`;
+        
+        await executeShellCommand(`powershell -Command "${command}"`);
+        return { success: true, message: `File written: ${path}` };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+async function getFileInfo(path) {
+    try {
+        const result = await executeShellCommand(`powershell -Command "Get-Item -Path '${path}' | Select-Object Name, FullName, Length, CreationTime, LastWriteTime, LastAccessTime, Attributes | ConvertTo-Json"`);
+        const fileInfo = JSON.parse(result.stdout);
+        
+        return {
+            success: true,
+            fileInfo: fileInfo
+        };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+// Network Diagnostics
+async function networkPing(host, count = 4) {
+    try {
+        const result = await executeShellCommand(`ping -n ${count} ${host}`);
+        return {
+            success: true,
+            output: result.stdout,
+            host: host,
+            count: count
+        };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+async function networkTraceroute(host) {
+    try {
+        const result = await executeShellCommand(`tracert ${host}`);
+        return {
+            success: true,
+            output: result.stdout,
+            host: host
+        };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+async function networkNetstat(filter = null) {
+    try {
+        let command = 'netstat -an';
+        if (filter) {
+            command += ` | findstr ${filter}`;
+        }
+        
+        const result = await executeShellCommand(command);
+        return {
+            success: true,
+            output: result.stdout
+        };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+async function getNetworkInterfaces() {
+    try {
+        const result = await executeShellCommand(`powershell -Command "Get-NetAdapter | Select-Object Name, InterfaceDescription, Status, LinkSpeed, MediaType | ConvertTo-Json"`);
+        const interfaces = JSON.parse(result.stdout);
+        
+        return {
+            success: true,
+            interfaces: Array.isArray(interfaces) ? interfaces : [interfaces]
+        };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+// System Information
+async function getDiskUsage(path = null) {
+    try {
+        const command = path ? 
+            `Get-WmiObject -Class Win32_LogicalDisk | Where-Object { $_.DeviceID -eq "${path}" } | Select-Object DeviceID, Size, FreeSpace | ConvertTo-Json` :
+            `Get-WmiObject -Class Win32_LogicalDisk | Select-Object DeviceID, Size, FreeSpace, VolumeName | ConvertTo-Json`;
+        
+        const result = await executeShellCommand(`powershell -Command "${command}"`);
+        const disks = JSON.parse(result.stdout);
+        
+        return {
+            success: true,
+            disks: Array.isArray(disks) ? disks : [disks]
+        };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+async function getEventLogs(logName = 'System', count = 100) {
+    try {
+        const result = await executeShellCommand(`powershell -Command "Get-EventLog -LogName ${logName} -Newest ${count} | Select-Object TimeGenerated, Source, EventID, EntryType, Message | ConvertTo-Json"`);
+        const events = JSON.parse(result.stdout);
+        
+        return {
+            success: true,
+            events: Array.isArray(events) ? events : [events]
+        };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+async function getInstalledSoftware() {
+    try {
+        const result = await executeShellCommand(`powershell -Command "Get-WmiObject -Class Win32_Product | Select-Object Name, Version, Vendor, InstallDate | ConvertTo-Json"`);
+        const software = JSON.parse(result.stdout);
+        
+        return {
+            success: true,
+            software: Array.isArray(software) ? software : [software]
+        };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+// Environment and Registry
+async function getEnvironmentVariables() {
+    try {
+        const result = await executeShellCommand(`powershell -Command "Get-ChildItem Env: | Select-Object Name, Value | ConvertTo-Json"`);
+        const variables = JSON.parse(result.stdout);
+        
+        return {
+            success: true,
+            variables: Array.isArray(variables) ? variables : [variables]
+        };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+async function setEnvironmentVariable(name, value, scope = 'User') {
+    try {
+        await executeShellCommand(`powershell -Command "[Environment]::SetEnvironmentVariable('${name}', '${value}', '${scope}')"`);
+        return { success: true, message: `Environment variable ${name} set to ${value}` };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+async function getRegistryValue(key, valueName) {
+    try {
+        const result = await executeShellCommand(`powershell -Command "Get-ItemProperty -Path '${key}' -Name '${valueName}' | ConvertTo-Json"`);
+        const regValue = JSON.parse(result.stdout);
+        
+        return {
+            success: true,
+            value: regValue[valueName]
+        };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+async function setRegistryValue(key, valueName, data, type = 'String') {
+    try {
+        await executeShellCommand(`powershell -Command "Set-ItemProperty -Path '${key}' -Name '${valueName}' -Value '${data}' -Type ${type}"`);
+        return { success: true, message: `Registry value ${valueName} set in ${key}` };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+// Maintenance Functions
+async function cleanupTempFiles() {
+    try {
+        const commands = [
+            'del /q /f /s %TEMP%\\*.*',
+            'del /q /f /s C:\\Windows\\Temp\\*.*',
+            'powershell -Command "Get-ChildItem -Path $env:TEMP -Recurse | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue"'
+        ];
+        
+        const results = [];
+        for (const cmd of commands) {
+            try {
+                const result = await executeShellCommand(cmd);
+                results.push(result.stdout);
+            } catch (error) {
+                results.push(`Error: ${error.message}`);
+            }
+        }
+        
+        return {
+            success: true,
+            message: 'Temporary files cleanup completed',
+            details: results
+        };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+async function defragmentDisk(drive) {
+    try {
+        await executeShellCommand(`defrag ${drive}: /O`);
+        return { success: true, message: `Disk ${drive}: defragmentation started` };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+async function checkDisk(drive, fix = false) {
+    try {
+        const command = fix ? 
+            `chkdsk ${drive}: /f /r` : 
+            `chkdsk ${drive}:`;
+        
+        const result = await executeShellCommand(command);
+        return {
+            success: true,
+            output: result.stdout,
+            drive: drive
+        };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+// Backup Functions
+async function backupFiles(sources, destination) {
+    try {
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const backupPath = `${destination}\\backup_${timestamp}`;
+        
+        await executeShellCommand(`powershell -Command "New-Item -Path '${backupPath}' -ItemType Directory -Force"`);
+        
+        for (const source of sources) {
+            await executeShellCommand(`powershell -Command "Copy-Item -Path '${source}' -Destination '${backupPath}' -Recurse -Force"`);
+        }
+        
+        return {
+            success: true,
+            message: `Backup created at ${backupPath}`,
+            backupPath: backupPath
+        };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+async function restoreFiles(backupPath, destination) {
+    try {
+        await executeShellCommand(`powershell -Command "Copy-Item -Path '${backupPath}\\*' -Destination '${destination}' -Recurse -Force"`);
+        return {
+            success: true,
+            message: `Files restored from ${backupPath} to ${destination}`
+        };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+// System Scan
+async function performSystemScan(type = 'quick') {
+    try {
+        let command;
+        switch (type) {
+            case 'sfc':
+                command = 'sfc /scannow';
+                break;
+            case 'dism':
+                command = 'DISM /Online /Cleanup-Image /RestoreHealth';
+                break;
+            case 'memory':
+                command = 'mdsched';
+                break;
+            default:
+                command = 'sfc /verifyonly';
+        }
+        
+        const result = await executeShellCommand(command);
+        return {
+            success: true,
+            output: result.stdout,
+            type: type
+        };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+// API endpoint handlers
+expressApp.get('/api/status', (req, res) => {
+    res.json({
+        status: 'running',
+        version: '1.0.0',
+        device_uuid: config.device_uuid || 'not-configured',
+        uptime: process.uptime()
+    });
+});
+
+// New SSH Command endpoint
+expressApp.post('/api/ssh-command', async (req, res) => {
+    try {
+        const { command, params = {}, timeout = 30000 } = req.body;
+        
+        if (!command) {
+            return res.status(400).json({
+                success: false,
+                error: 'Command is required'
+            });
+        }
+        
+        logToFile(`Received SSH command: ${command} with params: ${JSON.stringify(params)}`, 'INFO');
+        
+        // Execute the SSH command
+        const result = await executeSshCommand(command, params);
+        
+        logToFile(`SSH command ${command} completed successfully`, 'INFO');
+        res.json({
+            success: true,
+            result: result,
+            timestamp: new Date().toISOString()
+        });
+        
+    } catch (error) {
+        logToFile(`SSH command error: ${error.message}`, 'ERROR');
+        res.status(500).json({
+            success: false,
+            error: error.message,
+            timestamp: new Date().toISOString()
+        });
+    }
+});
+
+// File upload endpoint for file management
+expressApp.post('/api/upload-file', upload.single('file'), async (req, res) => {
+    try {
+        if (!req.file) {
+            return res.status(400).json({
+                success: false,
+                error: 'No file uploaded'
+            });
+        }
+        
+        const { destination } = req.body;
+        const sourcePath = req.file.path;
+        const targetPath = destination || path.join(__dirname, 'uploads', req.file.filename);
+        
+        // Move the uploaded file to the target location
+        await executeShellCommand(`powershell -Command "Move-Item -Path '${sourcePath}' -Destination '${targetPath}' -Force"`);
+        
+        res.json({
+            success: true,
+            message: `File uploaded to ${targetPath}`,
+            filename: req.file.filename,
+            path: targetPath
+        });
+        
+    } catch (error) {
+        logToFile(`File upload error: ${error.message}`, 'ERROR');
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// File download endpoint
+expressApp.get('/api/download-file', async (req, res) => {
+    try {
+        const { path: filePath } = req.query;
+        
+        if (!filePath) {
+            return res.status(400).json({
+                success: false,
+                error: 'File path is required'
+            });
+        }
+        
+        // Check if file exists
+        const fileInfo = await getFileInfo(filePath);
+        if (!fileInfo.success) {
+            return res.status(404).json({
+                success: false,
+                error: 'File not found'
+            });
+        }
+        
+        // Send the file
+        res.download(filePath, (err) => {
+            if (err) {
+                logToFile(`File download error: ${err.message}`, 'ERROR');
+                if (!res.headersSent) {
+                    res.status(500).json({
+                        success: false,
+                        error: 'Download failed'
+                    });
+                }
+            }
+        });
+        
+    } catch (error) {
+        logToFile(`File download error: ${error.message}`, 'ERROR');
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// Remote terminal endpoint for real-time command execution
+expressApp.post('/api/terminal', async (req, res) => {
+    try {
+        const { command, workingDirectory } = req.body;
+        
+        if (!command) {
+            return res.status(400).json({
+                success: false,
+                error: 'Command is required'
+            });
+        }
+        
+        // Change to working directory if specified
+        let fullCommand = command;
+        if (workingDirectory) {
+            fullCommand = `cd "${workingDirectory}" && ${command}`;
+        }
+        
+        const result = await executeShellCommand(fullCommand, 30000);
+        
+        res.json({
+            success: true,
+            output: result.stdout,
+            error: result.stderr,
+            exitCode: result.exitCode,
+            timestamp: new Date().toISOString()
+        });
+        
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            error: error.message,
+            timestamp: new Date().toISOString()
+        });
+    }
+});
+
+// Start Express server
+function startExpressServer() {
+    expressApp.listen(PORT, '127.0.0.1', () => {
+        logToFile(`Express server started on port ${PORT}`, 'INFO');
+    });
+}
+
+// Function to check if auto-startup is properly configured
+async function checkAutoStartupStatus() {
+  const status = {
+    autoLaunchLibrary: false,
+    registryUser: false,
+    registrySystem: false,
+    scheduledTask: false,
+    startupFolder: false
+  };
+  
+  try {
+    const { execSync } = require('child_process');
+    
+    // Check auto-launch library
+    try {
+      const autoLauncher = new AutoLaunch({
+        name: 'PulseGuard Agent',
+        path: process.execPath
+      });
+      status.autoLaunchLibrary = await autoLauncher.isEnabled();
+    } catch (error) {
+      logToFile(`Auto-launch library check failed: ${error.message}`, 'DEBUG');
+    }
+    
+    // Check user registry
+    try {
+      const userRegCommand = `reg query "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" /v "PulseGuardAgent" 2>nul`;
+      const userResult = execSync(userRegCommand, { encoding: 'utf8' });
+      status.registryUser = userResult.includes(process.execPath) || userResult.includes('PulseGuardAgent');
+    } catch (error) {
+      // Key doesn't exist
+    }
+    
+    // Check system registry (if we have admin rights)
+    try {
+      const systemRegCommand = `reg query "HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" /v "PulseGuardAgent" 2>nul`;
+      const systemResult = execSync(systemRegCommand, { encoding: 'utf8' });
+      status.registrySystem = systemResult.includes(process.execPath) || systemResult.includes('PulseGuardAgent');
+    } catch (error) {
+      // Key doesn't exist or no admin rights
+    }
+    
+    // Check scheduled task
+    try {
+      const taskCommand = `schtasks /query /tn "PulseGuard Agent Startup" 2>nul`;
+      const taskResult = execSync(taskCommand, { encoding: 'utf8' });
+      status.scheduledTask = taskResult.includes('PulseGuard Agent Startup') && taskResult.includes('Ready');
+    } catch (error) {
+      // Task doesn't exist
+    }
+    
+    // Check startup folders
+    const startupFolders = [
+      path.join(os.homedir(), 'AppData', 'Roaming', 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup'),
+      path.join(process.env.PROGRAMDATA || 'C:\\ProgramData', 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup')
+    ];
+    
+    for (const startupFolder of startupFolders) {
+      if (fsSync.existsSync(startupFolder)) {
+        try {
+          const files = fsSync.readdirSync(startupFolder);
+          const hasStartupFile = files.some(file => 
+            file.toLowerCase().includes('pulseguard') && 
+            (file.endsWith('.lnk') || file.endsWith('.exe'))
+          );
+          if (hasStartupFile) {
+            status.startupFolder = true;
+            break;
+          }
+        } catch (error) {
+          // Can't read folder
+        }
+      }
+    }
+    
+    logToFile(`Auto-startup status: ${JSON.stringify(status)}`);
+    return status;
+  } catch (error) {
+    logToFile(`Error checking auto-startup status: ${error.message}`, 'ERROR');
+    return status;
+  }
+}
+
+// IPC handler to check auto-startup status from UI
+ipcMain.on('check-autostart-status', async (event) => {
+  try {
+    const status = await checkAutoStartupStatus();
+    event.reply('autostart-status-result', { success: true, status });
+  } catch (error) {
+    logToFile(`Auto-startup status check failed: ${error.message}`, 'ERROR');
+    event.reply('autostart-status-result', { 
+      success: false, 
+      error: error.message 
+    });
+  }
+});
+
+// IPC handler to force auto-startup setup from UI
+ipcMain.on('setup-autostart', async (event) => {
+  try {
+    logToFile('Manual auto-startup setup requested from UI');
+    setupAutoLaunch();
+    
+    // Wait a moment and then check status
+    setTimeout(async () => {
+      const status = await checkAutoStartupStatus();
+      event.reply('autostart-setup-result', { success: true, status });
+    }, 2000);
+  } catch (error) {
+    logToFile(`Manual auto-startup setup failed: ${error.message}`, 'ERROR');
+    event.reply('autostart-setup-result', { 
       success: false, 
       error: error.message 
     });
