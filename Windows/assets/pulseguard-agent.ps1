@@ -4,6 +4,86 @@
 # Version information
 $AGENT_VERSION = "1.0.0"
 
+# Check if running in watchdog mode
+$isWatchdog = $args -contains "-watchdog"
+
+# If in watchdog mode, run the watchdog functionality
+if ($isWatchdog) {
+    # Watchdog functionality - ensures the agent is running
+    Write-Host "Starting PulseGuard Agent Watchdog..."
+    
+    # Find the agent executable
+    $agentExe = $null
+    $possiblePaths = @(
+        "$env:PROGRAMFILES\PulseGuard Agent\PulseGuard Agent.exe",
+        "C:\Program Files (x86)\PulseGuard Agent\PulseGuard Agent.exe",
+        "$env:LOCALAPPDATA\Programs\pulseguard-agent\PulseGuard Agent.exe",
+        "C:\Program Files\PulseGuard Agent\PulseGuard Agent.exe",
+        "C:\Program Files (x86)\PulseGuard Agent\PulseGuard Agent.exe"
+    )
+    
+    foreach ($path in $possiblePaths) {
+        if (Test-Path $path) {
+            $agentExe = $path
+            break
+        }
+    }
+    
+    if ($agentExe -eq $null) {
+        Write-Host "PulseGuard Agent executable not found. Watchdog cannot continue."
+        exit 1
+    }
+    
+    Write-Host "Found agent executable: $agentExe"
+    
+    # Check if the agent is already running
+    $isRunning = $false
+    try {
+        $processes = Get-Process | Where-Object { $_.Path -eq $agentExe }
+        if ($processes -and $processes.Count -gt 0) {
+            $isRunning = $true
+            Write-Host "PulseGuard Agent is already running (PID: $($processes[0].Id))"
+        }
+    } catch {
+        Write-Host "Error checking for running process: $_"
+    }
+    
+    # Start the agent if it's not running
+    if (-not $isRunning) {
+        Write-Host "PulseGuard Agent is not running. Starting it now..."
+        
+        try {
+            # Start the agent with startup flag
+            Start-Process -FilePath $agentExe -ArgumentList "--startup" -WindowStyle Hidden
+            Write-Host "PulseGuard Agent started successfully"
+            
+            # Wait a moment and verify it's running
+            Start-Sleep -Seconds 10
+            
+            $processes = Get-Process | Where-Object { $_.Path -eq $agentExe }
+            if ($processes -and $processes.Count -gt 0) {
+                Write-Host "PulseGuard Agent is now running (PID: $($processes[0].Id))"
+            } else {
+                Write-Host "PulseGuard Agent failed to start or terminated immediately"
+                
+                # Try one more time with a longer delay
+                Write-Host "Attempting to start agent again after delay..."
+                Start-Sleep -Seconds 30
+                
+                Start-Process -FilePath $agentExe -ArgumentList "--startup" -WindowStyle Hidden
+                Write-Host "Second attempt to start PulseGuard Agent completed"
+            }
+        } catch {
+            Write-Host "Error starting PulseGuard Agent: $_"
+        }
+    } else {
+        Write-Host "PulseGuard Agent is already running. Watchdog will exit."
+    }
+    
+    Write-Host "PulseGuard Agent Watchdog completed"
+    exit 0
+}
+
 # Configuration and Paths
 $logFile = "C:\Program Files\PulseGuard\logs\agent.log"
 $configFile = "C:\Program Files\PulseGuard\config.json"

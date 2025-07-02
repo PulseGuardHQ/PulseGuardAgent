@@ -14,7 +14,9 @@
     "pack": "electron-builder --dir",
     "dist": "electron-builder",
     "package-win": "electron-packager . PulseGuardAgent --platform=win32 --arch=x64 --out=dist --overwrite --asar --extra-resource=node_modules/electron/dist/ffmpeg.dll --extra-resource=node_modules/ffmpeg-static/ffmpeg.exe",
-    "postinstall": "electron-builder install-app-deps"
+    "postinstall": "electron-builder install-app-deps",
+    "install-service": "node ./install-service.js install",
+    "uninstall-service": "node ./uninstall-service.js uninstall"
   },
   "author": "PulseGuard",
   "license": "MIT",

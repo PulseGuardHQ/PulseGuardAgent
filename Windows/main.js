@@ -12,7 +12,6 @@ const https = require('https');
 const http = require('http');
 const { networkInterfaces } = require('os');
 const si = require('systeminformation');
-const AutoLaunch = require('auto-launch');
 
 // Ensure ffmpeg is properly loaded
 try {
@@ -158,120 +157,6 @@ async function isAdmin() {
       resolve(!error);
     });
   });
-}
-
-// Set up auto launch
-function setupAutoLaunch() {
-  // First try the auto-launch library (for backwards compatibility)
-  const autoLauncher = new AutoLaunch({
-    name: 'PulseGuard Agent',
-    path: process.execPath,
-    isHidden: true,
-    args: ['--startup']
-  });
-
-  autoLauncher.isEnabled().then((isEnabled) => {
-    if (!isEnabled) {
-      autoLauncher.enable().then(() => {
-        logToFile('Auto-launch enabled via auto-launch library');
-        // Also set up our backup methods
-        setupBackupAutoLaunch();
-      }).catch((err) => {
-        logToFile(`Auto-launch library failed: ${err.message}, trying backup methods`, 'WARN');
-        setupBackupAutoLaunch();
-      });
-    } else {
-      logToFile('Auto-launch is already enabled via auto-launch library');
-      // Still set up backup methods to ensure redundancy
-      setupBackupAutoLaunch();
-    }
-  }).catch((err) => {
-    logToFile(`Auto-launch library error: ${err.message}, using backup methods`, 'WARN');
-    setupBackupAutoLaunch();
-  });
-}
-
-// Backup auto-launch methods for better reliability
-function setupBackupAutoLaunch() {
-  try {
-    // Method 1: Windows Registry Run key
-    setupRegistryAutoLaunch();
-    
-    // Method 2: Windows Task Scheduler (more reliable for services)
-    setupTaskSchedulerAutoLaunch();
-    
-    logToFile('Backup auto-launch methods configured');
-  } catch (error) {
-    logToFile(`Error setting up backup auto-launch: ${error.message}`, 'ERROR');
-  }
-}
-
-function setupRegistryAutoLaunch() {
-  try {
-    const appName = 'PulseGuardAgent';
-    const executablePath = `"${process.execPath}" --startup`;
-    
-    // Add to current user registry (doesn't require admin)
-    const userRegCommand = `reg add "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" /v "${appName}" /t REG_SZ /d "${executablePath}" /f`;
-    
-    exec(userRegCommand, (error, stdout, stderr) => {
-      if (error) {
-        logToFile(`Failed to add user registry auto-launch: ${error.message}`, 'WARN');
-      } else {
-        logToFile('Registry auto-launch (user) configured successfully');
-      }
-    });
-    
-    // Try to add to system registry if we have admin rights
-    isAdmin().then(adminStatus => {
-      if (adminStatus) {
-        const systemRegCommand = `reg add "HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" /v "${appName}" /t REG_SZ /d "${executablePath}" /f`;
-        
-        exec(systemRegCommand, (error, stdout, stderr) => {
-          if (error) {
-            logToFile(`Failed to add system registry auto-launch: ${error.message}`, 'DEBUG');
-          } else {
-            logToFile('Registry auto-launch (system) configured successfully');
-          }
-        });
-      }
-    });
-  } catch (error) {
-    logToFile(`Registry auto-launch setup error: ${error.message}`, 'ERROR');
-  }
-}
-
-function setupTaskSchedulerAutoLaunch() {
-  try {
-    const taskName = 'PulseGuard Agent Startup';
-    const executablePath = process.execPath;
-    
-    // Create a Windows Task Scheduler task for auto-startup
-    // This is more reliable than registry entries for some Windows configurations
-    const createTaskCommand = `schtasks /create /tn "${taskName}" /tr "\\"${executablePath}\\" --startup" /sc onlogon /rl limited /f`;
-    
-    exec(createTaskCommand, (error, stdout, stderr) => {
-      if (error) {
-        logToFile(`Failed to create scheduled task: ${error.message}`, 'DEBUG');
-      } else {
-        logToFile('Scheduled task auto-launch configured successfully');
-        
-        // Set the task to run with highest privileges if we're admin
-        isAdmin().then(adminStatus => {
-          if (adminStatus) {
-            const elevateTaskCommand = `schtasks /change /tn "${taskName}" /rl highest`;
-            exec(elevateTaskCommand, (error) => {
-              if (!error) {
-                logToFile('Scheduled task elevated to highest privileges');
-              }
-            });
-          }
-        });
-      }
-    });
-  } catch (error) {
-    logToFile(`Task scheduler auto-launch setup error: ${error.message}`, 'ERROR');
-  }
 }
 
 // Create main window
@@ -540,36 +425,19 @@ async function testApiConnection() {
   try {
     logToFile('Testing API connection...');
     
-    // Probeer eerst de config endpoint - GET in plaats van POST
-    try {
-      const configResult = await makeApiRequest('/devices/config', 'GET');
-      logToFile('API config connection successful (HTTP 200)');
-      return true;
-    } catch (configError) {
-      logToFile(`API config test failed: ${configError.message}, trying status endpoint...`, 'WARN');
-    }
+    // Skip config and status endpoints als ze 422 errors geven (validation failed)
+    // Ga direct naar check-in met juiste payload format
     
-    // Probeer dan de status endpoint
-    try {
-      const statusResult = await makeApiRequest('/devices/status', 'GET');
-      logToFile('API status connection successful (HTTP 200)');
-      return true;
-    } catch (statusError) {
-      logToFile(`API status test failed: ${statusError.message}, trying check-in...`, 'WARN');
-    }
-    
-    // Als laatste proberen we de check-in endpoint met minimale data
+    // Test met een eenvoudige metrics-only payload
     const testPayload = {
       token: config.api_token,
       uuid: config.device_uuid,
       device_uuid: config.device_uuid,
       hostname: os.hostname(),
-      metrics: {
-        cpu_usage: 0,
-        memory_usage: 0,
-        disk_usage: 0,
-        uptime: 0
-      }
+      cpu_usage: 5.0,
+      memory_usage: 50.0,
+      disk_usage: 50.0,
+      uptime_seconds: 60
     };
     
     const result = await makeApiRequest('/devices/check-in', 'POST', testPayload);
@@ -1329,7 +1197,8 @@ async function createMetricsPayload() {
     cpu_usage: metrics.cpu_usage,
     memory_usage: metrics.memory_usage,
     disk_usage: metrics.disk_usage,
-    uptime_seconds: metrics.uptime
+    uptime_seconds: metrics.uptime,
+    os_type: "windows"
   };
 }
 
@@ -1601,9 +1470,6 @@ ipcMain.on('save-config', async (event, { deviceUUID, apiToken }) => {
       
       // Restart metrics collection with new configuration
       startMetricsCollection();
-      
-      // Set up auto-launch
-      setupAutoLaunch();
     } else {
       event.reply('config-error', 'Failed to save configuration file');
     }
@@ -1693,35 +1559,29 @@ ipcMain.on('check-for-updates', async (event) => {
 // Check for startup argument
 const isStartup = process.argv.includes('--startup');
 
+// Set higher timeout values for startup mode to handle slow system boot
+if (isStartup) {
+  // Increase timeouts for startup operations
+  process.env.STARTUP_MODE = 'true';
+  process.env.NODE_STARTUP_TIMEOUT = '60000'; // 60 seconds
+}
+
 // App ready event
 app.on('ready', async () => {
   await ensureDirectories();
   await loadConfig();
   
-  // Perform cleanup of old versions FIRST (before anything else)
-  await performOldVersionCleanup();
-  
   // Start Express server for API endpoints
   startExpressServer();
   
-  // Check if admin
-  const adminStatus = await isAdmin();
-  if (!adminStatus) {
-    logToFile('Application is not running with administrator privileges. Some features may not work correctly.', 'WARN');
-  }
-  
   createWindow();
   createTray();
-  setupAutoLaunch();
   
-  // Start with main window hidden if this is startup launch
-  if (isStartup) {
-    if (mainWindow) mainWindow.hide();
-    logToFile('Started in background mode');
-  } else {
-    // Only show window if not startup
-    if (mainWindow) mainWindow.show();
+  // Start with main window hidden. The service will run this in the background.
+  if (mainWindow) {
+    mainWindow.hide();
   }
+  logToFile('Agent started by service manager.');
   
   // Start metrics collection if configured
   if (config.api_token && config.device_uuid) {
@@ -1763,7 +1623,25 @@ app.on('before-quit', () => {
 // Prevent multiple instances of the app
 const gotTheLock = app.requestSingleInstanceLock();
 if (!gotTheLock) {
-  app.quit();
+  // If we're in startup mode and failed to get the lock, it might be because
+  // the previous instance is still shutting down or in a bad state
+  if (isStartup) {
+    logToFile('Failed to get app lock in startup mode. Waiting to retry...', 'WARN');
+    
+    // Wait and retry after a delay
+    setTimeout(() => {
+      const secondTry = app.requestSingleInstanceLock();
+      if (secondTry) {
+        logToFile('Successfully acquired app lock on second attempt', 'INFO');
+        // Continue app initialization
+      } else {
+        logToFile('Failed to get app lock on second attempt. Exiting.', 'ERROR');
+        app.quit();
+      }
+    }, 15000); // Wait 15 seconds before retry
+  } else {
+    app.quit();
+  }
 } else {
   app.on('second-instance', () => {
     // Show the main window if another instance tries to launch
@@ -3229,12 +3107,46 @@ ipcMain.on('setup-autostart', async (event) => {
     setTimeout(async () => {
       const status = await checkAutoStartupStatus();
       event.reply('autostart-setup-result', { success: true, status });
-    }, 2000);
+    }, 3000); // Give more time for setup to complete
   } catch (error) {
     logToFile(`Manual auto-startup setup failed: ${error.message}`, 'ERROR');
     event.reply('autostart-setup-result', { 
       success: false, 
       error: error.message 
+    });
+  }
+});
+
+// IPC handler to test auto-startup configuration
+ipcMain.on('test-autostart', async (event) => {
+  try {
+    logToFile('Testing auto-startup configuration from UI');
+    
+    // Check current status
+    const status = await checkAutoStartupStatus();
+    const hasAnyStartup = Object.values(status).some(status => status === true);
+    
+    if (hasAnyStartup) {
+      logToFile(`Auto-startup test PASSED. Active methods: ${JSON.stringify(status)}`);
+      event.reply('autostart-test-result', { 
+        success: true, 
+        status: status,
+        message: 'Auto-startup is properly configured!'
+      });
+    } else {
+      logToFile('Auto-startup test FAILED - no active startup methods detected');
+      event.reply('autostart-test-result', { 
+        success: false, 
+        status: status,
+        message: 'No auto-startup methods are active. The agent may not start automatically after system reboot.'
+      });
+    }
+  } catch (error) {
+    logToFile(`Auto-startup test failed: ${error.message}`, 'ERROR');
+    event.reply('autostart-test-result', { 
+      success: false, 
+      error: error.message,
+      message: 'Failed to test auto-startup configuration.'
     });
   }
 });

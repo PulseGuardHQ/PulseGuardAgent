@@ -104,6 +104,7 @@ cat > $INSTALL_DIR/pulseguard-agent << 'EOL'
 # ----------------------------
 # Version information
 AGENT_VERSION="1.0.0"
+EXPRESS_PORT=3001
 # Set log file
 LOG_FILE="/opt/pulseguard/logs/agent.log"
 CONFIG_FILE="/opt/pulseguard/config.json"
@@ -537,7 +538,7 @@ function collect_metrics() {
     log_debug "API Token (masked): ${api_token_val:0:5}..."
     
     # Create payload in the format expected by the API (metrics at top level, not nested)
-    local data_payload="{\"token\":\"$api_token_val\",\"hostname\":\"$hostname_val\",\"cpu_usage\":$cpu_usage_val,\"memory_usage\":$memory_usage_val,\"disk_usage\":$disk_usage_val,\"uptime_seconds\":$uptime_val,\"ip_address\":\"$ip_addr_val\",\"os_version\":\"$os_version_val\"}"
+    local data_payload="{\"token\":\"$api_token_val\",\"hostname\":\"$hostname_val\",\"cpu_usage\":$cpu_usage_val,\"memory_usage\":$memory_usage_val,\"disk_usage\":$disk_usage_val,\"uptime_seconds\":$uptime_val,\"ip_address\":\"$ip_addr_val\",\"os_version\":\"$os_version_val\",\"os_type\":\"linux\"}"
     
     local checkin_url_val="$api_base_url_val/devices/check-in"
     
@@ -605,7 +606,7 @@ function collect_metrics() {
         
         if [ "$http_code" == "500" ]; then
             log "Detected server error (HTTP 500), trying with minimal payload..."
-            local minimal_data_payload="{\"token\":\"$api_token_val\",\"hostname\":\"$hostname_val\",\"cpu_usage\":$cpu_usage_val,\"memory_usage\":$memory_usage_val,\"disk_usage\":$disk_usage_val,\"uptime_seconds\":$uptime_val}"
+            local minimal_data_payload="{\"token\":\"$api_token_val\",\"hostname\":\"$hostname_val\",\"cpu_usage\":$cpu_usage_val,\"memory_usage\":$memory_usage_val,\"disk_usage\":$disk_usage_val,\"uptime_seconds\":$uptime_val,\"os_type\":\"linux\"}"
             
             local retry_curl_output_file=$(mktemp)
             local retry_http_code=$(curl -L -s -X POST \
@@ -655,6 +656,680 @@ function collect_metrics() {
                 log_debug "Response: $retry_response_body"
             fi
         fi
+    fi
+}
+
+# Express Server Functions for SSH Commands
+function start_express_server() {
+    # Install Node.js if not available
+    if ! command -v node &> /dev/null; then
+        log "Installing Node.js for remote command server..."
+        if command -v apt-get &> /dev/null; then
+            curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
+            apt-get install -y nodejs
+        elif command -v yum &> /dev/null; then
+            curl -fsSL https://rpm.nodesource.com/setup_lts.x | sudo bash -
+            yum install -y nodejs npm
+        else
+            log "Could not install Node.js automatically. Remote commands will not be available."
+            return 1
+        fi
+    fi
+    
+    # Create Express server script
+    cat > /opt/pulseguard/express-server.js << 'NODEJS_EOF'
+const express = require('express');
+const cors = require('cors');
+const { exec, spawn } = require('child_process');
+const fs = require('fs').promises;
+const path = require('path');
+const os = require('os');
+
+const app = express();
+const PORT = 3001;
+
+app.use(cors());
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+
+// SSH Command execution function
+async function executeSshCommand(command, params = {}) {
+    try {
+        switch (command) {
+            case 'execute_shell':
+                return await executeShellCommand(params.command, params.timeout || 30000);
+            case 'get_processes':
+                return await getProcessList(params.filter);
+            case 'kill_process':
+                return await killProcess(params.pid, params.force);
+            case 'get_services':
+                return await getServicesList(params.status);
+            case 'control_service':
+                return await controlService(params.name, params.action);
+            case 'list_directory':
+                return await listDirectory(params.path, params.recursive);
+            case 'create_directory':
+                return await createDirectory(params.path);
+            case 'delete_file':
+                return await deleteFile(params.path, params.force);
+            case 'copy_file':
+                return await copyFile(params.source, params.destination);
+            case 'move_file':
+                return await moveFile(params.source, params.destination);
+            case 'read_file':
+                return await readFile(params.path, params.lines);
+            case 'write_file':
+                return await writeFile(params.path, params.content, params.append);
+            case 'get_file_info':
+                return await getFileInfo(params.path);
+            case 'network_ping':
+                return await networkPing(params.host, params.count);
+            case 'network_traceroute':
+                return await networkTraceroute(params.host);
+            case 'network_netstat':
+                return await networkNetstat(params.filter);
+            case 'get_disk_usage':
+                return await getDiskUsage(params.path);
+            case 'get_network_interfaces':
+                return await getNetworkInterfaces();
+            case 'get_system_logs':
+                return await getSystemLogs(params.lines);
+            case 'get_installed_software':
+                return await getInstalledSoftware();
+            case 'get_environment_variables':
+                return await getEnvironmentVariables();
+            case 'set_environment_variable':
+                return await setEnvironmentVariable(params.name, params.value);
+            case 'cleanup_temp':
+                return await cleanupTempFiles();
+            case 'system_scan':
+                return await performSystemScan(params.type);
+            case 'check_disk':
+                return await checkDisk(params.device, params.fix);
+            default:
+                throw new Error(`Unknown SSH command: ${command}`);
+        }
+    } catch (error) {
+        console.error(`SSH command error: ${error.message}`);
+        throw error;
+    }
+}
+
+// Helper function to execute shell commands
+function executeShellCommand(command, timeout = 30000) {
+    return new Promise((resolve, reject) => {
+        const child = exec(command, { 
+            timeout: timeout,
+            maxBuffer: 1024 * 1024 * 10 // 10MB buffer
+        }, (error, stdout, stderr) => {
+            if (error) {
+                if (error.killed) {
+                    reject(new Error(`Command timed out after ${timeout}ms`));
+                } else {
+                    reject(new Error(`Command failed: ${error.message}`));
+                }
+                return;
+            }
+            
+            resolve({
+                success: true,
+                stdout: stdout.trim(),
+                stderr: stderr.trim(),
+                exitCode: 0
+            });
+        });
+        
+        setTimeout(() => {
+            child.kill();
+            reject(new Error(`Command timed out after ${timeout}ms`));
+        }, timeout);
+    });
+}
+
+// Process Management
+async function getProcessList(filter = null) {
+    try {
+        let command = 'ps aux --no-headers';
+        if (filter) {
+            command += ` | grep "${filter}"`;
+        }
+        command += ' | head -50'; // Limit results
+        
+        const result = await executeShellCommand(command);
+        const lines = result.stdout.split('\n').filter(line => line.trim());
+        
+        const processes = lines.map(line => {
+            const parts = line.trim().split(/\s+/);
+            return {
+                user: parts[0],
+                pid: parts[1],
+                cpu: parts[2],
+                mem: parts[3],
+                command: parts.slice(10).join(' ')
+            };
+        });
+        
+        return { success: true, processes };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+async function killProcess(pid, force = false) {
+    try {
+        const signal = force ? '-9' : '-15';
+        await executeShellCommand(`kill ${signal} ${pid}`);
+        return { success: true, message: `Process ${pid} terminated` };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+// Service Management
+async function getServicesList(status = null) {
+    try {
+        let command = 'systemctl list-units --type=service --no-pager --no-legend';
+        if (status) {
+            command += ` --state=${status}`;
+        }
+        
+        const result = await executeShellCommand(command);
+        const lines = result.stdout.split('\n').filter(line => line.trim());
+        
+        const services = lines.map(line => {
+            const parts = line.trim().split(/\s+/);
+            return {
+                name: parts[0],
+                loaded: parts[1],
+                active: parts[2],
+                running: parts[3],
+                description: parts.slice(4).join(' ')
+            };
+        });
+        
+        return { success: true, services };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+async function controlService(serviceName, action) {
+    try {
+        let command;
+        switch (action) {
+            case 'start':
+                command = `systemctl start ${serviceName}`;
+                break;
+            case 'stop':
+                command = `systemctl stop ${serviceName}`;
+                break;
+            case 'restart':
+                command = `systemctl restart ${serviceName}`;
+                break;
+            case 'enable':
+                command = `systemctl enable ${serviceName}`;
+                break;
+            case 'disable':
+                command = `systemctl disable ${serviceName}`;
+                break;
+            case 'status':
+                command = `systemctl status ${serviceName}`;
+                break;
+            default:
+                throw new Error(`Invalid service action: ${action}`);
+        }
+        
+        const result = await executeShellCommand(command);
+        return { 
+            success: true, 
+            message: `Service ${serviceName} ${action}ed successfully`,
+            output: result.stdout
+        };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+// File Management
+async function listDirectory(dirPath = '.', recursive = false) {
+    try {
+        let command = recursive ? `find "${dirPath}" -type f -o -type d` : `ls -la "${dirPath}"`;
+        
+        const result = await executeShellCommand(command);
+        const lines = result.stdout.split('\n').filter(line => line.trim());
+        
+        if (recursive) {
+            return { success: true, items: lines.map(path => ({ path })) };
+        } else {
+            const items = lines.slice(1).map(line => {
+                const parts = line.trim().split(/\s+/);
+                return {
+                    permissions: parts[0],
+                    size: parts[4],
+                    name: parts.slice(8).join(' '),
+                    type: parts[0].startsWith('d') ? 'directory' : 'file'
+                };
+            });
+            return { success: true, items };
+        }
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+async function createDirectory(dirPath) {
+    try {
+        await executeShellCommand(`mkdir -p "${dirPath}"`);
+        return { success: true, message: `Directory created: ${dirPath}` };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+async function deleteFile(filePath, force = false) {
+    try {
+        const command = force ? `rm -rf "${filePath}"` : `rm "${filePath}"`;
+        await executeShellCommand(command);
+        return { success: true, message: `File/Directory deleted: ${filePath}` };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+async function copyFile(source, destination) {
+    try {
+        await executeShellCommand(`cp -r "${source}" "${destination}"`);
+        return { success: true, message: `File copied from ${source} to ${destination}` };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+async function moveFile(source, destination) {
+    try {
+        await executeShellCommand(`mv "${source}" "${destination}"`);
+        return { success: true, message: `File moved from ${source} to ${destination}` };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+async function readFile(filePath, lines = null) {
+    try {
+        let command = lines ? `head -n ${lines} "${filePath}"` : `cat "${filePath}"`;
+        const result = await executeShellCommand(command);
+        return {
+            success: true,
+            content: result.stdout,
+            encoding: 'utf-8'
+        };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+async function writeFile(filePath, content, append = false) {
+    try {
+        const operator = append ? '>>' : '>';
+        await executeShellCommand(`echo "${content}" ${operator} "${filePath}"`);
+        return { success: true, message: `File written: ${filePath}` };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+async function getFileInfo(filePath) {
+    try {
+        const result = await executeShellCommand(`stat "${filePath}"`);
+        return {
+            success: true,
+            fileInfo: result.stdout
+        };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+// Network Functions
+async function networkPing(host, count = 4) {
+    try {
+        const result = await executeShellCommand(`ping -c ${count} ${host}`);
+        return {
+            success: true,
+            output: result.stdout,
+            host: host,
+            count: count
+        };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+async function networkTraceroute(host) {
+    try {
+        const result = await executeShellCommand(`traceroute ${host}`);
+        return {
+            success: true,
+            output: result.stdout,
+            host: host
+        };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+async function networkNetstat(filter = null) {
+    try {
+        let command = 'netstat -tuln';
+        if (filter) {
+            command += ` | grep ${filter}`;
+        }
+        
+        const result = await executeShellCommand(command);
+        return {
+            success: true,
+            output: result.stdout
+        };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+async function getNetworkInterfaces() {
+    try {
+        const result = await executeShellCommand('ip addr show');
+        return {
+            success: true,
+            interfaces: result.stdout
+        };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+// System Information
+async function getDiskUsage(path = '/') {
+    try {
+        const result = await executeShellCommand(`df -h ${path}`);
+        return {
+            success: true,
+            output: result.stdout
+        };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+async function getSystemLogs(lines = 100) {
+    try {
+        const result = await executeShellCommand(`journalctl -n ${lines} --no-pager`);
+        return {
+            success: true,
+            logs: result.stdout
+        };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+async function getInstalledSoftware() {
+    try {
+        let command;
+        if (await executeShellCommand('which dpkg').then(() => true).catch(() => false)) {
+            command = 'dpkg -l | grep ^ii';
+        } else if (await executeShellCommand('which rpm').then(() => true).catch(() => false)) {
+            command = 'rpm -qa';
+        } else {
+            throw new Error('No supported package manager found');
+        }
+        
+        const result = await executeShellCommand(command);
+        return {
+            success: true,
+            software: result.stdout
+        };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+async function getEnvironmentVariables() {
+    try {
+        const result = await executeShellCommand('env');
+        const lines = result.stdout.split('\n').filter(line => line.includes('='));
+        const variables = lines.map(line => {
+            const [name, ...valueParts] = line.split('=');
+            return { name, value: valueParts.join('=') };
+        });
+        
+        return {
+            success: true,
+            variables: variables
+        };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+async function setEnvironmentVariable(name, value) {
+    try {
+        await executeShellCommand(`export ${name}="${value}"`);
+        return { success: true, message: `Environment variable ${name} set to ${value}` };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+// Maintenance Functions
+async function cleanupTempFiles() {
+    try {
+        const commands = [
+            'rm -rf /tmp/*',
+            'rm -rf /var/tmp/*',
+            'apt-get autoremove -y',
+            'apt-get autoclean'
+        ];
+        
+        const results = [];
+        for (const cmd of commands) {
+            try {
+                const result = await executeShellCommand(cmd);
+                results.push(result.stdout);
+            } catch (error) {
+                results.push(`Error: ${error.message}`);
+            }
+        }
+        
+        return {
+            success: true,
+            message: 'Temporary files cleanup completed',
+            details: results
+        };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+async function checkDisk(device = '/', fix = false) {
+    try {
+        const command = fix ? `fsck -y ${device}` : `fsck -n ${device}`;
+        const result = await executeShellCommand(command);
+        return {
+            success: true,
+            output: result.stdout,
+            device: device
+        };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+async function performSystemScan(type = 'basic') {
+    try {
+        let command;
+        switch (type) {
+            case 'security':
+                command = 'rkhunter --check --sk';
+                break;
+            case 'memory':
+                command = 'free -h && cat /proc/meminfo | head -20';
+                break;
+            case 'cpu':
+                command = 'lscpu && cat /proc/cpuinfo | head -20';
+                break;
+            default:
+                command = 'uname -a && uptime && df -h && free -h';
+        }
+        
+        const result = await executeShellCommand(command);
+        return {
+            success: true,
+            output: result.stdout,
+            type: type
+        };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+// API Routes
+app.get('/api/status', (req, res) => {
+    res.json({
+        status: 'running',
+        version: '1.0.0',
+        platform: 'linux',
+        os_type: 'linux',
+        uptime: process.uptime(),
+        hostname: os.hostname(),
+        network: {
+            interfaces: Object.keys(os.networkInterfaces())
+        },
+        timestamp: new Date().toISOString()
+    });
+});
+
+app.post('/api/ssh-command', async (req, res) => {
+    try {
+        const { command, params = {}, timeout = 30000 } = req.body;
+        
+        if (!command) {
+            return res.status(400).json({
+                success: false,
+                error: 'Command is required'
+            });
+        }
+        
+        console.log(`Received SSH command: ${command} with params:`, params);
+        
+        const result = await executeSshCommand(command, params);
+        
+        res.json({
+            success: true,
+            result: result,
+            timestamp: new Date().toISOString()
+        });
+        
+    } catch (error) {
+        console.error(`SSH command error: ${error.message}`);
+        res.status(500).json({
+            success: false,
+            error: error.message,
+            timestamp: new Date().toISOString()
+        });
+    }
+});
+
+app.post('/api/terminal', async (req, res) => {
+    try {
+        const { command, workingDirectory } = req.body;
+        
+        if (!command) {
+            return res.status(400).json({
+                success: false,
+                error: 'Command is required'
+            });
+        }
+        
+        let fullCommand = command;
+        if (workingDirectory) {
+            fullCommand = `cd "${workingDirectory}" && ${command}`;
+        }
+        
+        const result = await executeShellCommand(fullCommand, 30000);
+        
+        res.json({
+            success: true,
+            output: result.stdout,
+            error: result.stderr,
+            exitCode: result.exitCode,
+            timestamp: new Date().toISOString()
+        });
+        
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            error: error.message,
+            timestamp: new Date().toISOString()
+        });
+    }
+});
+
+// Start server
+app.listen(PORT, '0.0.0.0', () => {
+    console.log(`PulseGuard Express server started on port ${PORT} (accessible from any IP)`);
+});
+NODEJS_EOF
+
+    # Install required npm packages
+    cd /opt/pulseguard
+    cat > package.json << 'PACKAGE_EOF'
+{
+  "name": "pulseguard-linux-agent",
+  "version": "1.0.0",
+  "description": "PulseGuard Linux Agent Express Server",
+  "main": "express-server.js",
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5"
+  },
+  "scripts": {
+    "start": "node express-server.js"
+  }
+}
+PACKAGE_EOF
+
+    if command -v npm &> /dev/null; then
+        npm install --production
+        log "Express server dependencies installed"
+        
+        # Configure firewall to allow Express server port
+        log "Configuring firewall for Express server port $EXPRESS_PORT..."
+        if command -v ufw &> /dev/null && ufw status | grep -q "active"; then
+            ufw allow $EXPRESS_PORT/tcp
+            log "Firewall (ufw) configured to allow port $EXPRESS_PORT"
+        elif command -v firewall-cmd &> /dev/null; then
+            firewall-cmd --permanent --add-port=$EXPRESS_PORT/tcp
+            firewall-cmd --reload
+            log "Firewall (firewalld) configured to allow port $EXPRESS_PORT"
+        elif command -v iptables &> /dev/null; then
+            iptables -A INPUT -p tcp --dport $EXPRESS_PORT -j ACCEPT
+            if command -v iptables-save &> /dev/null; then
+                iptables-save > /etc/iptables/rules.v4 2>/dev/null || iptables-save > /etc/iptables.rules 2>/dev/null
+                log "Firewall (iptables) configured to allow port $EXPRESS_PORT"
+            else
+                log "Warning: iptables rule added but might not persist after reboot"
+            fi
+        else
+            log "No supported firewall detected, skipping firewall configuration"
+        fi
+        
+        # Start Express server in background
+        nohup node express-server.js > /opt/pulseguard/logs/express.log 2>&1 &
+        EXPRESS_PID=$!
+        echo $EXPRESS_PID > /opt/pulseguard/express.pid
+        log "Express server started with PID: $EXPRESS_PID"
+    else
+        log "npm not available, remote commands will not work"
     fi
 }
 
@@ -732,9 +1407,33 @@ fi
 
 log "Agent main loop started. Sending metrics every $CHECK_INTERVAL seconds."
 
+# Start Express server for remote commands
+start_express_server
+
 LAST_METRICS_SEND_ATTEMPT=0
 LAST_UPDATE_CHECK_TS=0 # Timestamp of last update check
 UPDATE_CHECK_FREQUENCY_SECONDS=3600 # How often to check for updates (e.g., 1 hour)
+
+# Function to cleanup on exit
+cleanup() {
+    log "Agent shutdown initiated, cleaning up..."
+    
+    # Stop Express server if running
+    if [ -f /opt/pulseguard/express.pid ]; then
+        EXPRESS_PID=$(cat /opt/pulseguard/express.pid)
+        if kill -0 $EXPRESS_PID 2>/dev/null; then
+            log "Stopping Express server (PID: $EXPRESS_PID)"
+            kill $EXPRESS_PID
+        fi
+        rm -f /opt/pulseguard/express.pid
+    fi
+    
+    log "Cleanup completed"
+    exit 0
+}
+
+# Set up signal handlers
+trap cleanup SIGTERM SIGINT SIGQUIT
 
 while true; do
     current_ts=$(date +%s)
@@ -800,6 +1499,7 @@ User=root
 # The script itself will read its config from config.json primarily
 Environment="PULSEGUARD_DEVICE_UUID=$DEVICE_UUID"
 Environment="PULSEGUARD_API_TOKEN=$API_TOKEN"
+Environment="PULSEGUARD_OS_TYPE=linux"
 
 [Install]
 WantedBy=multi-user.target
@@ -817,17 +1517,38 @@ systemctl enable pulseguard-agent.service # Added .service suffix
 systemctl restart pulseguard-agent.service # Added .service suffix
 
 # Check if service is running
-if systemctl is-active --quiet pulseguard-agent.service; then # Added .service suffix
+if systemctl is-active --quiet pulseguard-agent.service; then
     echo -e "\\e[32mPulseGuard Agent service installed and running successfully!\\e[0m"
     echo -e "\\e[32mInstallation complete. The agent will now begin reporting system metrics.\\e[0m"
     echo -e "\\e[33mTo check logs: sudo journalctl -u pulseguard-agent.service -f\\e[0m"
     echo -e "\\e[33mDetailed logs: sudo cat /opt/pulseguard/logs/agent.log\\e[0m"
+    
+    # Verify Express server is running
+    if [ -f /opt/pulseguard/express.pid ] && kill -0 $(cat /opt/pulseguard/express.pid) 2>/dev/null; then
+        echo -e "\\e[32mRemote command server is running on port $EXPRESS_PORT\\e[0m"
+        echo -e "\\e[33mTo test API: curl http://localhost:$EXPRESS_PORT/api/status\\e[0m"
+    else
+        echo -e "\\e[31mWarning: Express server for remote commands is not running.\\e[0m"
+        echo -e "\\e[33mCheck logs at /opt/pulseguard/logs/express.log\\e[0m"
+        echo -e "\\e[33mYou can try to start it manually: cd /opt/pulseguard && node express-server.js\\e[0m"
+    fi
 else
     echo -e "\\e[31mService installation completed, but the service is not running or failed to start.\\e[0m"
     echo -e "\\e[33mPlease check the logs for errors:\\e[0m"
     echo -e "\\e[33msudo journalctl -u pulseguard-agent.service -n 50 --no-pager\\e[0m"
     echo -e "\\e[33msudo cat /opt/pulseguard/logs/agent.log\\e[0m"
     echo -e "\\e[33mYou can try to start it manually with: sudo systemctl start pulseguard-agent.service\\e[0m"
+    
+    # Try to start the service again
+    echo -e "\\e[33mAttempting to restart the service...\\e[0m"
+    systemctl restart pulseguard-agent.service
+    sleep 5
+    
+    if systemctl is-active --quiet pulseguard-agent.service; then
+        echo -e "\\e[32mService successfully restarted!\\e[0m"
+    else
+        echo -e "\\e[31mService restart failed. Please check the logs.\\e[0m"
+    fi
 fi
 
 echo ""
