@@ -12,21 +12,60 @@ const https = require('https');
 const http = require('http');
 const { networkInterfaces } = require('os');
 const si = require('systeminformation');
+const { Service } = require('node-windows');
 
-// Ensure ffmpeg is properly loaded
-try {
-  // Try to load ffmpeg from the static package
-  require('ffmpeg-static');
-} catch (error) {
-  console.error('Failed to load ffmpeg-static:', error.message);
-}
-
-// Global references
+// Global variables and configuration
+const isServiceMode = process.argv.includes('--service-mode');
+let windowsService;
 let mainWindow;
 let tray = null;
 let isQuitting = false;
 let metricsInterval = null;
 let updateCheckInterval = null;
+
+// Windows Service Configuration
+if (isServiceMode) {
+  windowsService = new Service({
+    name: 'PulseGuardAgent',
+    description: 'The PulseGuard monitoring agent.',
+    script: process.execPath,
+    env: [
+      {
+        name: "NODE_ENV",
+        value: process.env.NODE_ENV || "production"
+      }
+    ],
+    workingDirectory: path.dirname(process.execPath)
+  });
+
+  windowsService.on('install', () => {
+    logToFile('Windows Service installed successfully');
+    windowsService.start();
+  });
+
+  windowsService.on('uninstall', () => {
+    logToFile('Windows Service uninstalled');
+  });
+
+  windowsService.on('start', () => {
+    logToFile('Windows Service started');
+  });
+
+  windowsService.on('stop', () => {
+    logToFile('Windows Service stopped');
+  });
+
+  windowsService.on('error', (error) => {
+    logToFile(`Windows Service error: ${error.message}`, 'ERROR');
+  });
+}
+
+// Global references
+// let mainWindow;
+// let tray = null;
+// let isQuitting = false;
+// let metricsInterval = null;
+// let updateCheckInterval = null;
 
 // Update checking state
 let lastUpdateCheck = 0;
@@ -174,13 +213,12 @@ function createWindow() {
 
   mainWindow.loadFile('index.html');
 
+  // When the user clicks the 'X' on the window, hide it instead of closing.
   mainWindow.on('close', (event) => {
     if (!isQuitting) {
       event.preventDefault();
       mainWindow.hide();
-      return false;
     }
-    return true;
   });
 
   mainWindow.on('closed', () => {
@@ -193,59 +231,44 @@ function createTray() {
   tray = new Tray(path.join(__dirname, 'assets/website-icon.png'));
   
   const contextMenu = Menu.buildFromTemplate([
-    { label: 'Open PulseGuard', click: () => { if (mainWindow) mainWindow.show(); } },
-    { label: 'Send Metrics Now', click: () => { collectAndSendMetrics(true); } },
-    { type: 'separator' },
-    { 
-      label: 'Power Management',
-      submenu: [
-        { label: 'Lock Computer', click: () => { executePowerCommand('lock'); } },
-        { label: 'Sleep', click: () => { executePowerCommand('sleep'); } },
-        { label: 'Restart', click: () => { 
-          dialog.showMessageBox({
-            type: 'question',
-            buttons: ['Yes', 'No'],
-            title: 'Confirm Restart',
-            message: 'Are you sure you want to restart your computer?'
-          }).then(result => {
-            if (result.response === 0) {
-              executePowerCommand('restart');
-            }
-          });
-        }},
-        { label: 'Shutdown', click: () => {
-          dialog.showMessageBox({
-            type: 'question',
-            buttons: ['Yes', 'No'],
-            title: 'Confirm Shutdown',
-            message: 'Are you sure you want to shutdown your computer?'
-          }).then(result => {
-            if (result.response === 0) {
-              executePowerCommand('shutdown');
-            }
-          });
-        }}
-      ]
+    {
+      label: 'Open Dashboard',
+      click: () => {
+        showWindow();
+      }
+    },
+    {
+      label: 'Send Metrics Now',
+      click: () => {
+        logToFile('Manual metrics send triggered from tray');
+        collectAndSendMetrics(true);
+      }
     },
     { type: 'separator' },
-    { label: 'Quit', click: () => { 
+    {
+      label: 'Quit',
+      click: () => {
       isQuitting = true;
       app.quit(); 
-    } }
+      }
+    }
   ]);
   
   tray.setToolTip('PulseGuard Agent');
   tray.setContextMenu(contextMenu);
   
-  tray.on('click', () => {
-    if (mainWindow) {
-      if (mainWindow.isVisible()) {
-        mainWindow.hide();
-      } else {
-        mainWindow.show();
-      }
-    }
+  tray.on('double-click', () => {
+    showWindow();
   });
+}
+
+function showWindow() {
+    if (mainWindow) {
+        mainWindow.show();
+    mainWindow.focus();
+  } else {
+    createWindow();
+      }
 }
 
 // Get MAC address using systeminformation
@@ -1425,57 +1448,60 @@ function startMetricsCollection() {
 }
 
 // Handle the onboarding process via UI
-ipcMain.on('save-config', async (event, { deviceUUID, apiToken }) => {
+ipcMain.on('save-config', async (event, newConfig) => {
   try {
-    // Validate inputs
-    if (!deviceUUID || !apiToken) {
-      event.reply('config-error', 'Device UUID and API Token are required');
+    const isInitialSetup = !!newConfig.deviceUUID && !!newConfig.apiToken;
+    const oldInterval = config.check_interval;
+    let needsSave = false;
+
+    if (isInitialSetup) {
+      logToFile('Performing initial configuration setup...');
+      config.device_uuid = newConfig.deviceUUID;
+      config.api_token = newConfig.apiToken;
+      needsSave = true;
+    } else {
+      logToFile('Updating configuration from settings...');
+      // Handle partial updates from the settings page
+      if (newConfig.api_base_url && newConfig.api_base_url !== config.api_base_url) {
+        config.api_base_url = newConfig.api_base_url;
+        needsSave = true;
+        logToFile(`API URL updated to: ${config.api_base_url}`);
+      }
+      if (newConfig.check_interval && newConfig.check_interval !== config.check_interval) {
+        config.check_interval = newConfig.check_interval;
+        needsSave = true;
+        logToFile(`Check interval updated to: ${config.check_interval}ms`);
+      }
+    }
+
+    if (!needsSave) {
+      logToFile('No configuration changes detected, no save needed.', 'INFO');
+      event.reply('config-saved', { success: true, config: config });
       return;
     }
     
-    // Validate UUID format
-    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-    if (!uuidRegex.test(deviceUUID)) {
-      event.reply('config-error', 'Device UUID format is invalid. Please use the format provided by PulseGuard.');
-      return;
-    }
+    const saved = await saveConfig();
     
-    // Validate API token has minimum length
-    if (apiToken.length < 20) {
-      event.reply('config-error', 'API Token is too short. Please enter a valid API Token.');
-      return;
-    }
-    
-    logToFile(`Saving new configuration with Device UUID: ${deviceUUID.substring(0, 8)}...`);
-    
-    // Update config
-    config.device_uuid = deviceUUID;
-    config.api_token = apiToken;
-    
-    // Save config to file
-    await ensureDirectories();
-    if (await saveConfig()) {
-      event.reply('config-saved');
-      
-      // Test API connection with new config
-      logToFile('Testing API connection with new configuration...');
-      const connectionSuccess = await testApiConnection();
-      if (connectionSuccess) {
-        logToFile('API connection test successful with new configuration');
-        mainWindow.webContents.send('connection-status', { success: true, message: 'Connection to PulseGuard API successful!' });
-      } else {
-        logToFile('API connection test failed with new configuration, but will continue trying', 'WARN');
-        mainWindow.webContents.send('connection-status', { success: false, message: 'Could not connect to PulseGuard API, but will continue trying.' });
+    if (saved) {
+      // If the API details changed during initial setup, test the connection
+      if (isInitialSetup) {
+        await testApiConnection();
       }
       
-      // Restart metrics collection with new configuration
+      // Restart metrics collection if interval has changed
+      if (oldInterval !== config.check_interval) {
+        logToFile('Check interval has changed, restarting metrics collection...');
       startMetricsCollection();
+      }
+      
+      event.reply('config-saved', { success: true, config: config });
     } else {
-      event.reply('config-error', 'Failed to save configuration file');
+      logToFile('Failed to save configuration file', 'ERROR');
+      event.reply('config-saved', { success: false, error: 'Failed to save configuration file' });
     }
   } catch (error) {
     logToFile(`Error saving configuration: ${error.message}`, 'ERROR');
-    event.reply('config-error', `Error: ${error.message}`);
+    event.reply('config-saved', { success: false, error: error.message });
   }
 });
 
@@ -1491,54 +1517,9 @@ ipcMain.on('get-status', (event) => {
 });
 
 // Trigger an immediate metrics collection from UI
-ipcMain.on('send-metrics-now', (event) => {
-  collectAndSendMetrics(true)
-    .then(() => {
-      event.reply('metrics-sent-response', { success: true });
-    })
-    .catch((error) => {
-      event.reply('metrics-sent-response', { success: false, error: error.message });
-    });
-});
-
-// Update API URL from UI
-ipcMain.on('update-api-url', async (event, apiUrl) => {
-  try {
-    // Validate URL format
-    try {
-      new URL(apiUrl);
-    } catch (e) {
-      event.reply('settings-error', 'Invalid URL format. Please enter a valid URL.');
-      return;
-    }
-    
-    logToFile(`Updating API URL to: ${apiUrl}`);
-    
-    // Update config
-    config.api_base_url = apiUrl;
-    
-    // Save config to file
-    if (await saveConfig()) {
-      // Test connection with new URL
-      const connectionSuccess = await testApiConnection();
-      
-      if (connectionSuccess) {
-        logToFile('API connection test successful with new URL');
-        event.reply('settings-saved');
-      } else {
-        logToFile('API connection test failed with new URL, maar toch opgeslagen', 'WARN');
-        event.reply('settings-error', 'Kon geen verbinding maken met de nieuwe URL. De instelling is wel opgeslagen, maar check of de server juist is geconfigureerd.');
-      }
-      
-      // Restart metrics collection with new configuration
-      startMetricsCollection();
-    } else {
-      event.reply('settings-error', 'Failed to save configuration file');
-    }
-  } catch (error) {
-    logToFile(`Error updating API URL: ${error.message}`, 'ERROR');
-    event.reply('settings-error', `Error: ${error.message}`);
-  }
+ipcMain.on('send-metrics-now', () => {
+  logToFile('Manual metrics send triggered from UI');
+  collectAndSendMetrics(true);
 });
 
 // Check for updates from UI
@@ -1566,22 +1547,40 @@ if (isStartup) {
   process.env.NODE_STARTUP_TIMEOUT = '60000'; // 60 seconds
 }
 
-// App ready event
+// --- Service Mode Detection ---
+// const isServiceMode = process.argv.includes('--service-mode');
+
+// Prevent multiple instances of the app.
+// This is important for both service mode and user-launched mode.
+const gotTheLock = app.requestSingleInstanceLock();
+
+if (!gotTheLock) {
+  // If we don't get the lock, another instance is already running.
+  // The second-instance event will be fired in the primary instance, so this one can exit.
+  app.quit();
+} else {
+  app.on('second-instance', (event, commandLine, workingDirectory) => {
+    // Someone tried to run a second instance. We should focus our window.
+    showWindow();
+  });
+
+  // App ready event - this will only be run for the primary instance.
 app.on('ready', async () => {
   await ensureDirectories();
   await loadConfig();
   
-  // Start Express server for API endpoints
+    // Start background processes
   startExpressServer();
   
-  createWindow();
   createTray();
   
-  // Start with main window hidden. The service will run this in the background.
-  if (mainWindow) {
-    mainWindow.hide();
+    // If not running as a service (e.g., in development), show the window immediately.
+    // Otherwise, the window will only be created when requested.
+    if (!isServiceMode) {
+      showWindow();
+  } else {
+      logToFile('Agent started in service mode. UI is hidden until requested.');
   }
-  logToFile('Agent started by service manager.');
   
   // Start metrics collection if configured
   if (config.api_token && config.device_uuid) {
@@ -1590,21 +1589,20 @@ app.on('ready', async () => {
     logToFile('Application started but not fully configured yet - metrics collection disabled', 'WARN');
   }
   
-  // Start update checker
   startUpdateChecker();
-  
-  // Initialize remote access services
   setupRemoteAccess();
 });
+}
 
 // Handle window activation
 app.on('activate', () => {
+  // On macOS it's common to re-create a window in the app when the
+  // dock icon is clicked and there are no other windows open.
   if (BrowserWindow.getAllWindows().length === 0) {
-    createWindow();
+    showWindow();
   }
 });
 
-// Handle app quit
 app.on('before-quit', () => {
   isQuitting = true;
   
@@ -1619,39 +1617,6 @@ app.on('before-quit', () => {
   
   logToFile('PulseGuard Agent shutting down');
 });
-
-// Prevent multiple instances of the app
-const gotTheLock = app.requestSingleInstanceLock();
-if (!gotTheLock) {
-  // If we're in startup mode and failed to get the lock, it might be because
-  // the previous instance is still shutting down or in a bad state
-  if (isStartup) {
-    logToFile('Failed to get app lock in startup mode. Waiting to retry...', 'WARN');
-    
-    // Wait and retry after a delay
-    setTimeout(() => {
-      const secondTry = app.requestSingleInstanceLock();
-      if (secondTry) {
-        logToFile('Successfully acquired app lock on second attempt', 'INFO');
-        // Continue app initialization
-      } else {
-        logToFile('Failed to get app lock on second attempt. Exiting.', 'ERROR');
-        app.quit();
-      }
-    }, 15000); // Wait 15 seconds before retry
-  } else {
-    app.quit();
-  }
-} else {
-  app.on('second-instance', () => {
-    // Show the main window if another instance tries to launch
-    if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.show();
-      mainWindow.focus();
-    }
-  });
-}
 
 // Log important API responses for troubleshooting
 function logApiResponse(response) {

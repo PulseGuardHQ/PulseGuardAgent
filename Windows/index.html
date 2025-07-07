@@ -347,8 +347,8 @@
         
         <div class="form-group">
           <label for="settings-check-interval">Check Interval (seconds):</label>
-          <input type="text" id="settings-check-interval" readonly>
-          <small class="form-text">Interval voor het verzenden van systeemgegevens</small>
+          <input type="number" id="settings-check-interval" min="10">
+          <small class="form-text">Interval for sending system metrics (minimum 10 seconds).</small>
         </div>
         
         <div class="button-group">
@@ -456,22 +456,31 @@
     
     saveSettingsButton.addEventListener('click', () => {
       const apiUrl = apiUrlInput.value.trim();
+      const checkInterval = document.getElementById('settings-check-interval').value;
       
       if (!apiUrl) {
         showSettingsError('API URL is required');
         return;
       }
+
+      if (!checkInterval || Number(checkInterval) < 10) {
+        showSettingsError('Check interval must be at least 10 seconds.');
+        return;
+      }
       
       // Disable button while processing
       saveSettingsButton.disabled = true;
-      saveSettingsButton.textContent = 'Opslaan...';
+      saveSettingsButton.textContent = 'Saving...';
       
       // Clear previous messages
       settingsError.style.display = 'none';
       settingsSuccess.style.display = 'none';
       
-      // Send API URL update to main process
-      ipcRenderer.send('update-api-url', apiUrl);
+      // Send configuration update to main process
+      ipcRenderer.send('save-config', {
+        api_base_url: apiUrl,
+        check_interval: Number(checkInterval) * 1000 // Convert to milliseconds
+      });
     });
     
     // Update check button handler
@@ -507,15 +516,44 @@
     });
     
     // IPC Event handlers
-    ipcRenderer.on('config-saved', () => {
-      configSuccess.style.display = 'block';
-      configError.style.display = 'none';
-      
-      // Re-enable button
+    ipcRenderer.on('config-loaded', (event, config) => {
+      if (config.isConfigured) {
+        // Populate dashboard status
+        statusDeviceUuid.textContent = config.device_uuid;
+        statusCheckInterval.textContent = config.check_interval / 1000;
+        
+        // Populate settings tab
+        apiUrlInput.value = config.api_base_url || '';
+        settingsDeviceUuid.value = config.device_uuid || '';
+        settingsCheckInterval.value = config.check_interval ? (config.check_interval / 1000) : 60;
+        
+        // Show dashboard, hide setup
+        setupScreen.style.display = 'none';
+        dashboardScreen.style.display = 'block';
+        backFromSetupButton.style.display = 'none';
+      } else {
+        // Show setup screen if not configured
+        setupScreen.style.display = 'block';
+        dashboardScreen.style.display = 'none';
+      }
+    });
+    
+    ipcRenderer.on('config-saved', (event, { success, error, config }) => {
+      // Re-enable both save buttons
       saveConfigButton.disabled = false;
       saveConfigButton.textContent = 'Save Configuration';
-      
-      // Wait for connection status before transitioning
+      saveSettingsButton.disabled = false;
+      saveSettingsButton.textContent = 'Instellingen Opslaan';
+
+      if (success) {
+        // This function will show the success message on the correct screen
+        // and transition to the dashboard if needed.
+        showSuccessMessage(config);
+      } else {
+        // Show error on both screens, one will be hidden
+        showConfigError(error || 'An unknown error occurred.');
+        showSettingsError(error || 'An unknown error occurred.');
+      }
     });
     
     ipcRenderer.on('connection-status', (event, status) => {
@@ -711,6 +749,30 @@
     document.getElementById('logo').onerror = function() {
       this.src = 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyMDAiIGhlaWdodD0iNTAiPjxyZWN0IHdpZHRoPSIyMDAiIGhlaWdodD0iNTAiIGZpbGw9IiMyYTU4ODUiLz48dGV4dCB4PSIyMCIgeT0iMzAiIGZvbnQtZmFtaWx5PSJBcmlhbCIgZm9udC1zaXplPSIxNiIgZmlsbD0id2hpdGUiPlB1bHNlR3VhcmQ8L3RleHQ+PC9zdmc+';
     };
+
+    function showSuccessMessage(config) {
+      if (setupScreen.style.display === 'block') {
+        // We were on the initial setup screen
+        configSuccess.style.display = 'block';
+        configError.style.display = 'none';
+        
+        // After a short delay, switch to the dashboard
+        setTimeout(() => {
+          ipcRenderer.send('get-config'); // Reload config on dashboard
+          setupScreen.style.display = 'none';
+          dashboardScreen.style.display = 'block';
+          backFromSetupButton.style.display = 'none';
+        }, 1500);
+
+      } else {
+        // We were on the settings tab
+        settingsSuccess.style.display = 'block';
+        settingsError.style.display = 'none';
+
+        // Also update the status tab display
+        statusCheckInterval.textContent = config.check_interval / 1000;
+      }
+    }
   </script>
 </body>
 </html>
